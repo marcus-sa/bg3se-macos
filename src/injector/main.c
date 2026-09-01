@@ -1971,7 +1971,31 @@ static void osi_report_node_classes(void) {
 }
 
 
-static int osi_db_read_facts(lua_State *L, void *def) {
+/* Render a DB Get's Lua filter arguments (stack slots 2..1+nfilter) as
+ * "'S_Player_Astarion_…', nil". A filtered read that returns nothing logs the
+ * filter alongside the row count so the log says which lookup missed. */
+static void osi_format_lua_filters(lua_State *L, int nfilter, char *buf, size_t bufsz) {
+    size_t n = 0;
+    buf[0] = '\0';
+    for (int i = 0; i < nfilter && n + 8 < bufsz; i++) {
+        int slot = 2 + i;
+        const char *sep = n ? ", " : "";
+        int w;
+        if (lua_isnil(L, slot)) {
+            w = snprintf(buf + n, bufsz - n, "%snil", sep);
+        } else if (lua_type(L, slot) == LUA_TNUMBER) {
+            w = snprintf(buf + n, bufsz - n, "%s%s", sep, lua_tostring(L, slot));
+        } else {
+            const char *v = lua_tostring(L, slot);
+            w = snprintf(buf + n, bufsz - n, "%s'%s'", sep, v ? v : "?");
+        }
+        if (w < 0) break;
+        n += (size_t)w;
+        if (n >= bufsz) { buf[bufsz - 1] = '\0'; return; }
+    }
+}
+
+static int osi_db_read_facts(lua_State *L, void *def, const char *dbName) {
     int nfilter = lua_gettop(L) - 1;      /* filter args at stack 2..top */
     if (nfilter < 0) nfilter = 0;
 
@@ -2012,7 +2036,20 @@ static int osi_db_read_facts(lua_State *L, void *def) {
         cur = nxt;
     }
 
-    LOG_OSIRIS_DEBUG("Osi DB (Facts): %d rows, %u cols", rowCount, colCount);
+    // Name the database and echo the filter. "0 rows, 1 cols" on its own cannot
+    // distinguish "this row genuinely is not in the DB" from "the filter never
+    // matched a row that is", and mods branch hard on the difference:
+    // BanishedEnemyFix strips every SitOut passive off any combatant whose
+    // DB_PartyMembers:Get(guid) comes back empty.
+    if (rowCount == 0 && nfilter > 0) {
+        char fb[384];
+        osi_format_lua_filters(L, nfilter, fb, sizeof(fb));
+        LOG_OSIRIS_DEBUG("Osi.%s:Get(%s) — 0 of %d rows matched (%u cols)",
+                         dbName ? dbName : "DB_?", fb, guard, colCount);
+    } else {
+        LOG_OSIRIS_DEBUG("Osi.%s:Get() — %d rows, %u cols",
+                         dbName ? dbName : "DB_?", rowCount, colCount);
+    }
     return 1;
 }
 
@@ -2209,7 +2246,7 @@ static int lua_osi_db_get(lua_State *L) {
      * id — read their Facts list directly (Windows-parity). */
     void *dbDef = osi_db_lookup(db_name);
     if (dbDef) {
-        return osi_db_read_facts(L, dbDef);
+        return osi_db_read_facts(L, dbDef, db_name);
     }
 
     uint8_t arity = 0;
@@ -2396,6 +2433,56 @@ static int osi_value_to_lua(lua_State *L, OsiArgumentValue *val) {
             }
             return 1;
         }
+    }
+}
+
+/* Render an OsiArgumentDesc chain as "[0]t5='S_Player_…' [1]t4='SitOut' [2]i=0".
+ *
+ * Every Osi.* dispatch log used to carry only the function name and a 0/1
+ * result. When Osi.AddPassive reported 0 there was no way to tell WHICH
+ * character and passive were refused, so a real dispatch failure and a
+ * legitimate no-op looked identical in the log and the only way forward was a
+ * live console session. Rendering the arguments makes an ordinary play session
+ * self-diagnosing.
+ *
+ * Strings are copied through safe_memory so a bad pointer prints as <?> rather
+ * than faulting inside a logging call.
+ */
+static void osi_format_args(OsiArgumentDesc *args, char *buf, size_t bufsz) {
+    size_t n = 0;
+    int i = 0;
+    buf[0] = '\0';
+    for (OsiArgumentDesc *a = args; a && i < 16 && n + 8 < bufsz; a = a->nextParam, i++) {
+        int w = 0;
+        switch (a->value.typeId) {
+            case OSI_TYPE_INTEGER:
+                w = snprintf(buf + n, bufsz - n, "%s[%d]i=%d", n ? " " : "", i, a->value.int32Val);
+                break;
+            case OSI_TYPE_INTEGER64:
+                w = snprintf(buf + n, bufsz - n, "%s[%d]i64=%lld", n ? " " : "", i,
+                             (long long)a->value.int64Val);
+                break;
+            case OSI_TYPE_REAL:
+                w = snprintf(buf + n, bufsz - n, "%s[%d]f=%g", n ? " " : "", i,
+                             (double)a->value.floatVal);
+                break;
+            default: {
+                char s[128];
+                if (a->value.stringVal &&
+                    safe_memory_read_string((mach_vm_address_t)(uintptr_t)a->value.stringVal,
+                                            s, sizeof(s))) {
+                    w = snprintf(buf + n, bufsz - n, "%s[%d]t%u='%s'", n ? " " : "", i,
+                                 a->value.typeId, s);
+                } else {
+                    w = snprintf(buf + n, bufsz - n, "%s[%d]t%u=<?>", n ? " " : "", i,
+                                 a->value.typeId);
+                }
+                break;
+            }
+        }
+        if (w < 0) break;
+        n += (size_t)w;
+        if (n >= bufsz) { buf[bufsz - 1] = '\0'; return; }
     }
 }
 
@@ -2709,7 +2796,18 @@ static int osi_dynamic_call(lua_State *L) {
             // Call types
             if (callFn) {
                 result = callFn(dispatchHandle, args);
-                LOG_OSIRIS_DEBUG("Osi.%s: Call returned %d (via DivCall, handle=0x%08x)", funcName, result, dispatchHandle);
+                if (result) {
+                    LOG_OSIRIS_DEBUG("Osi.%s: Call returned 1 (via DivCall, handle=0x%08x)",
+                                     funcName, dispatchHandle);
+                } else {
+                    // A refused call changes no engine state, so the mod's next
+                    // read sees the old value and the bug surfaces far from here.
+                    // Name the arguments at WARN so the log alone identifies it.
+                    char ab[512];
+                    osi_format_args(args, ab, sizeof(ab));
+                    LOG_OSIRIS_WARN("Osi.%s: Call REFUSED by Osiris (handle=0x%08x) — no engine "
+                                    "state changed. args: %s", funcName, dispatchHandle, ab);
+                }
                 return 0;
             } else {
                 log_message("[WARN] [Osiris] Osi.%s: g_divCall is NULL — RegisterDIVFunctions may not have fired", funcName);
@@ -2721,7 +2819,19 @@ static int osi_dynamic_call(lua_State *L) {
             // Event/Proc types
             if (callFn) {
                 result = callFn(dispatchHandle, args);
-                LOG_OSIRIS_DEBUG("Osi.%s: Event/Proc dispatch returned %d (via DivCall, handle=0x%08x)", funcName, result, dispatchHandle);
+                if (result) {
+                    LOG_OSIRIS_DEBUG("Osi.%s: Event/Proc dispatch returned 1 (via DivCall, handle=0x%08x)",
+                                     funcName, dispatchHandle);
+                } else {
+                    // Same as the Call case: silent no-op unless the args are logged.
+                    // This is how Osi.AddPassive(char, "SitOut") failing four times at
+                    // LevelGameplayStarted stayed invisible.
+                    char ab[512];
+                    osi_format_args(args, ab, sizeof(ab));
+                    LOG_OSIRIS_WARN("Osi.%s: Event/Proc dispatch REFUSED by Osiris "
+                                    "(handle=0x%08x) — no engine state changed. args: %s",
+                                    funcName, dispatchHandle, ab);
+                }
                 return 0;
             } else {
                 log_message("[WARN] [Osiris] Osi.%s: g_divCall is NULL — RegisterDIVFunctions may not have fired", funcName);
