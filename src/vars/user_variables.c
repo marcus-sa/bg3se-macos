@@ -87,6 +87,90 @@ static void free_variable(UserVariable *var) {
 }
 
 // ============================================================================
+// Helper: Identity-stable cache for table-valued variables
+// ============================================================================
+//
+// Table variables are stored as JSON. Without a cache, every read re-parsed
+// that JSON into a BRAND NEW Lua table, so the mod-facing semantics silently
+// diverged from Windows BG3SE: a nested write went into a throwaway table and
+// vanished.
+//
+//     Vars.SittingOut[combat] = Vars.SittingOut[combat] or {}   -- lost
+//     if Vars.SittingOut[combat][uuid] then                     -- indexes nil
+//
+// That is exactly how "Sit This One Out 2" fails on macOS: DoSitOut() aborts
+// at SitOut.lua:596 before it reaches Osi.ApplyStatus(..., SITOUT_ONCOMBATSTART
+// _DOONCE_TECHNICAL), so companions never actually sit out. FindEnemies (:503)
+// and OnLeftCombat (:668) die the same way.
+//
+// Windows BG3SE hands back the same deserialized table every read and only
+// reserializes when it syncs/persists. Mirror that with a strong-valued cache
+// table in the Lua registry.
+//
+// The cache is PER LUA STATE (registry-scoped): server and client run separate
+// states with separate registries, so a table cached in one is meaningless in
+// the other. Cross-state coherence still goes through the JSON, exactly as
+// before — this changes nothing about sync, only about object identity within
+// one state.
+//
+// The stored JSON goes stale the moment a mod mutates the cached table in
+// place. That is fine because every reader of value.string for a table
+// (uvar_get / mvar_get, and therefore the save paths, which serialize what
+// those return) consults the cache first.
+
+#define VARCACHE_REGISTRY_KEY "BG3SE_VarTableCache"
+
+/* "<scope>|<id>|<key>" — scope 'e' for entity vars, 'm' for mod vars. */
+static void varcache_key(char *out, size_t n, char scope,
+                         const char *id, const char *key) {
+    snprintf(out, n, "%c|%s|%s", scope, id ? id : "", key ? key : "");
+}
+
+/* Push the cache table for this state, creating it on first use. */
+static void varcache_push_table(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, VARCACHE_REGISTRY_KEY);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, VARCACHE_REGISTRY_KEY);
+    }
+}
+
+/* Push the cached table for `ck` and return 1, or push nothing and return 0. */
+static int varcache_push(lua_State *L, const char *ck) {
+    varcache_push_table(L);
+    lua_getfield(L, -1, ck);
+    if (lua_istable(L, -1)) {
+        lua_remove(L, -2);      /* drop the cache table, keep the value */
+        return 1;
+    }
+    lua_pop(L, 2);
+    return 0;
+}
+
+/* Cache the value at `value_index` under `ck` (tables only; anything else
+ * clears the entry so a later read falls through to the stored scalar). */
+static void varcache_store(lua_State *L, const char *ck, int value_index) {
+    if (value_index < 0) value_index = lua_gettop(L) + value_index + 1;
+    varcache_push_table(L);
+    if (lua_type(L, value_index) == LUA_TTABLE) {
+        lua_pushvalue(L, value_index);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_setfield(L, -2, ck);
+    lua_pop(L, 1);
+}
+
+static void varcache_remove(lua_State *L, const char *ck) {
+    varcache_push_table(L);
+    lua_pushnil(L);
+    lua_setfield(L, -2, ck);
+    lua_pop(L, 1);
+}
+
+// ============================================================================
 // Helper: Find entity by GUID
 // ============================================================================
 
@@ -382,6 +466,15 @@ void uvar_set(lua_State *L, const char *guid, uint64_t handle,
             break;
     }
 
+    // Keep the caller's own table as the cached object for this state, so a
+    // later read returns the SAME table and in-place nested writes survive.
+    {
+        char ck[UVAR_GUID_LENGTH + UVAR_MAX_KEY_LENGTH + 8];
+        varcache_key(ck, sizeof(ck), 'e', guid, key);
+        if (vtype == LUA_TTABLE) varcache_store(L, ck, value_index);
+        else                     varcache_remove(L, ck);
+    }
+
     var->dirty = true;
     g_Dirty = true;
 
@@ -431,18 +524,28 @@ int uvar_get(lua_State *L, const char *guid, const char *key) {
             }
             break;
 
-        case UVAR_TYPE_TABLE:
+        case UVAR_TYPE_TABLE: {
+            // Identity-stable: hand back the same table every read, so mods can
+            // mutate it in place (entity.Vars.Foo.bar = 1). Only deserialize on
+            // a cache miss (first read of this state, or after a reload).
+            char ck[UVAR_GUID_LENGTH + UVAR_MAX_KEY_LENGTH + 8];
+            varcache_key(ck, sizeof(ck), 'e', guid, key);
+            if (varcache_push(L, ck)) break;
+
             if (var->value.string) {
                 // Parse JSON back to table
                 const char *end = json_parse_value(L, var->value.string);
                 if (!end) {
                     LOG_LUA_ERROR("Failed to parse stored JSON for %s.%s", guid, key);
                     lua_pushnil(L);
+                } else {
+                    varcache_store(L, ck, -1);
                 }
             } else {
                 lua_pushnil(L);
             }
             break;
+        }
 
         default:
             lua_pushnil(L);
@@ -1068,6 +1171,16 @@ void mvar_set(lua_State *L, const char *mod_uuid, const char *key, int value_ind
             break;
     }
 
+    // Keep the caller's own table as the cached object for this state, so a
+    // later read returns the SAME table and in-place nested writes survive
+    // (Vars.SittingOut[combat] = {} then Vars.SittingOut[combat][uuid] = true).
+    {
+        char ck[UVAR_GUID_LENGTH + UVAR_MAX_KEY_LENGTH + 8];
+        varcache_key(ck, sizeof(ck), 'm', mod_uuid, key);
+        if (vtype == LUA_TTABLE) varcache_store(L, ck, value_index);
+        else                     varcache_remove(L, ck);
+    }
+
     var->dirty = true;
     mod->dirty = true;
     g_ModsDirty = true;
@@ -1115,17 +1228,27 @@ int mvar_get(lua_State *L, const char *mod_uuid, const char *key) {
             }
             break;
 
-        case UVAR_TYPE_TABLE:
+        case UVAR_TYPE_TABLE: {
+            // Identity-stable: hand back the same table every read. Without
+            // this, Vars.X[k] = v is written into a throwaway parse result and
+            // silently lost (see the cache helpers above).
+            char ck[UVAR_GUID_LENGTH + UVAR_MAX_KEY_LENGTH + 8];
+            varcache_key(ck, sizeof(ck), 'm', mod_uuid, key);
+            if (varcache_push(L, ck)) break;
+
             if (var->value.string) {
                 const char *end = json_parse_value(L, var->value.string);
                 if (!end) {
                     LOG_LUA_ERROR("Failed to parse stored JSON for mod %s.%s", mod_uuid, key);
                     lua_pushnil(L);
+                } else {
+                    varcache_store(L, ck, -1);
                 }
             } else {
                 lua_pushnil(L);
             }
             break;
+        }
 
         default:
             lua_pushnil(L);

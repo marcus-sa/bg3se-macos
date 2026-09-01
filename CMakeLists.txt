@@ -386,6 +386,7 @@ if(BUILD_TESTS)
         tests/tier0/test_mod_paths.c
         tests/tier0/test_lua_runtime.c
         tests/tier0/test_guid_lookup.c
+        tests/tier0/test_user_variables.c
         tests/tier0/stub_logging.c
         src/core/safe_memory.c
         src/entity/guid_lookup.c
@@ -393,6 +394,8 @@ if(BUILD_TESTS)
         src/mod/mod_paths.c
         src/lua/lua_runtime.c
         src/lua/lua_context.c
+        src/lua/lua_json.c
+        src/vars/user_variables.c
     )
     target_include_directories(bg3se_test_tier0 PRIVATE
         ${CMAKE_SOURCE_DIR}/tests/tier0
@@ -401,6 +404,7 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/entity
         ${CMAKE_SOURCE_DIR}/src/mod
         ${CMAKE_SOURCE_DIR}/src/lua
+        ${CMAKE_SOURCE_DIR}/src/vars
         ${LUA_SRC_DIR}
     )
     target_link_libraries(bg3se_test_tier0 PRIVATE lua_static "-framework Foundation")
