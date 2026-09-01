@@ -36,7 +36,7 @@
 // =============================================================================
 
 static bool g_HooksInstalled = false;
-#define FUNCTOR_HOOK_TARGET_COUNT 10
+#define FUNCTOR_HOOK_TARGET_COUNT 11
 static int g_InstalledCount = 0;
 static uint64_t g_EventCount = 0;
 
@@ -57,7 +57,8 @@ static ExecuteFunctorsProc g_OrigNearbyAttacking = NULL;
 static ExecuteFunctorsProc g_OrigEquip = NULL;
 static ExecuteFunctorsProc g_OrigSource = NULL;
 static ExecuteInterruptFunctorsProc g_OrigInterrupt = NULL;
-static ProcessDealDamageFunctorsProc g_OrigProcessDealDamage = NULL;
+static DealDamageApplyDamageProc g_OrigDealDamageApply = NULL;
+static StatsSystemThrowDamageEventProc g_OrigThrowDamageEvent = NULL;
 
 static uintptr_t get_runtime_addr(GameFunctionId id) {
     return (uintptr_t)offset_table_game_fn(id);
@@ -74,9 +75,9 @@ static inline int has_functor_subscribers(void) {
            events_get_handler_count(EVENT_AFTER_EXECUTE_FUNCTOR);
 }
 
-static inline int has_damage_subscribers(void) {
-    return events_get_handler_count(EVENT_BEFORE_DEAL_DAMAGE) +
-           events_get_handler_count(EVENT_DEAL_DAMAGE);
+static inline int has_deal_damage_subscribers(void) {
+    return events_get_handler_count(EVENT_DEAL_DAMAGE) +
+           events_get_handler_count(EVENT_DEALT_DAMAGE);
 }
 
 /*
@@ -141,30 +142,27 @@ static void fire_after_execute_functor_event(const StatsFunctorList* functors, v
     lua_gate_unlock();
 }
 
-static void fire_damage_event(
-    BG3SEEventType event,
-    void* worldView,
-    const StatsFunctorBase* functor,
-    uint64_t entityHandle,
-    const void* position,
-    const void* spellState,
-    const void* damageEffectFlags,
-    const void* ability,
-    const void* spellAttackType,
-    const void* dependency1,
-    const void* dependency2,
-    int eventIndex,
-    void* interruptEvents
-) {
+static void fire_deal_damage_event(BG3SEEventType event,
+                                   const DealDamageEventData *data) {
     if (!atomic_load_explicit(&g_DispatchEnabled, memory_order_acquire)) return;
     if (!lua_runtime_state_for(LUA_CONTEXT_SERVER)) return;
     lua_gate_lock();
     lua_State* L = lua_runtime_state_for(LUA_CONTEXT_SERVER);
     if (L && atomic_load_explicit(&g_DispatchEnabled, memory_order_acquire)) {
-        events_fire_damage(
-            L, event, worldView, (void*)functor, entityHandle,
-            position, spellState, damageEffectFlags, ability, spellAttackType,
-            dependency1, dependency2, eventIndex, interruptEvents);
+        events_fire_deal_damage(L, event, data);
+        g_EventCount++;
+    }
+    lua_gate_unlock();
+}
+
+static void fire_before_deal_damage_event(void* statsSystem, const void* hit,
+                                          const void* attack) {
+    if (!atomic_load_explicit(&g_DispatchEnabled, memory_order_acquire)) return;
+    if (!lua_runtime_state_for(LUA_CONTEXT_SERVER)) return;
+    lua_gate_lock();
+    lua_State* L = lua_runtime_state_for(LUA_CONTEXT_SERVER);
+    if (L && atomic_load_explicit(&g_DispatchEnabled, memory_order_acquire)) {
+        events_fire_before_deal_damage(L, statsSystem, hit, attack);
         g_EventCount++;
     }
     lua_gate_unlock();
@@ -277,51 +275,104 @@ static void hook_ExecuteFunctors_Interrupt(
     fire_after_execute_functor_event(functors, ctx, FUNCTOR_CTX_INTERRUPT);
 }
 
-static void hook_ProcessDealDamageFunctors(
-    void* worldView,
-    const StatsFunctorBase* functor,
-    const uint64_t* entityHandle,
+/*
+ * esv::functor::StatsFunctorDealDamage::Execute — Windows'
+ * DealDamageFunctor::ApplyDamage. Sources DealDamage (pre) and DealtDamage
+ * (post, with Result).
+ *
+ * The parameter list is load-bearing in two places; see the ABI note above
+ * DealDamageApplyDamageProc in functor_types.h before touching it. result_out
+ * is the hidden output object in x0 and must be forwarded verbatim; hitWith is
+ * a one-byte enum whose width fixes the stack offsets of the four arguments
+ * behind it.
+ */
+static void* hook_DealDamageFunctor_ApplyDamage(
+    void*       result_out,
+    const void* functor,
+    const void* casterRef,
+    const void* targetRef,
     const void* position,
-    const void* spellState,
-    const void* damageEffectFlags,
-    const void* ability,
-    const void* spellAttackType,
-    const void* dependency1,
-    const void* dependency2,
-    int eventIndex,
-    void* interruptEvents
+    bool        isFromItem,
+    const void* spellId,
+    uint32_t    storyActionId,
+    const void* originator,
+    const void* classDescriptions,
+    const void* hit,
+    const void* attack,
+    const void* sourceHandle2,
+    uint8_t     hitWith,
+    int32_t     conditionRollIndex,
+    bool        entityDamagedEvent,
+    const void* sourceHandle3,
+    const void* spellId2
 ) {
-    if (!has_damage_subscribers()) {
-        if (g_OrigProcessDealDamage) {
-            g_OrigProcessDealDamage(
-                worldView, functor, entityHandle, position, spellState,
-                damageEffectFlags, ability, spellAttackType, dependency1,
-                dependency2, eventIndex, interruptEvents);
-        }
-        return;
+    if (!g_OrigDealDamageApply) return result_out;
+
+    if (!has_deal_damage_subscribers()) {
+        return g_OrigDealDamageApply(
+            result_out, functor, casterRef, targetRef, position, isFromItem,
+            spellId, storyActionId, originator, classDescriptions, hit, attack,
+            sourceHandle2, hitWith, conditionRollIndex, entityDamagedEvent,
+            sourceHandle3, spellId2);
     }
 
-    uint64_t entity = entityHandle ? *entityHandle : 0;
-    if (events_get_handler_count(EVENT_BEFORE_DEAL_DAMAGE) > 0) {
-        fire_damage_event(
-            EVENT_BEFORE_DEAL_DAMAGE, worldView, functor, entity, position,
-            spellState, damageEffectFlags, ability, spellAttackType, dependency1,
-            dependency2, eventIndex, interruptEvents);
-    }
-
-    if (g_OrigProcessDealDamage) {
-        g_OrigProcessDealDamage(
-            worldView, functor, entityHandle, position, spellState,
-            damageEffectFlags, ability, spellAttackType, dependency1,
-            dependency2, eventIndex, interruptEvents);
-    }
+    DealDamageEventData data = {
+        .result             = NULL,
+        .functor            = functor,
+        .casterRef          = casterRef,
+        .targetRef          = targetRef,
+        .position           = position,
+        .spellId            = spellId,
+        .originator         = originator,
+        .hit                = hit,
+        .attack             = attack,
+        .sourceHandle2      = sourceHandle2,
+        .spellId2           = spellId2,
+        .storyActionId      = storyActionId,
+        .conditionRollIndex = conditionRollIndex,
+        .hitWith            = hitWith,
+        .isFromItem         = isFromItem,
+    };
 
     if (events_get_handler_count(EVENT_DEAL_DAMAGE) > 0) {
-        fire_damage_event(
-            EVENT_DEAL_DAMAGE, worldView, functor, entity, position, spellState,
-            damageEffectFlags, ability, spellAttackType, dependency1,
-            dependency2, eventIndex, interruptEvents);
+        fire_deal_damage_event(EVENT_DEAL_DAMAGE, &data);
     }
+
+    void* ret = g_OrigDealDamageApply(
+        result_out, functor, casterRef, targetRef, position, isFromItem,
+        spellId, storyActionId, originator, classDescriptions, hit, attack,
+        sourceHandle2, hitWith, conditionRollIndex, entityDamagedEvent,
+        sourceHandle3, spellId2);
+
+    if (events_get_handler_count(EVENT_DEALT_DAMAGE) > 0) {
+        data.result = result_out;
+        fire_deal_damage_event(EVENT_DEALT_DAMAGE, &data);
+    }
+
+    return ret;
+}
+
+/*
+ * esv::StatsSystem::ApplyDamage — Windows' StatsSystem::ThrowDamageEvent.
+ * Sources BeforeDealDamage, which on Windows carries Hit and Attack only.
+ * All six arguments are register-passed (x0..x3, w4, w5), so there is no
+ * stack-packing hazard here; the only requirement is forwarding all six.
+ */
+static void hook_StatsSystem_ThrowDamageEvent(
+    void*       statsSystem,
+    const void* entityView,
+    void*       hit,
+    void*       attack,
+    uint8_t     ability,
+    bool        flag
+) {
+    if (!g_OrigThrowDamageEvent) return;
+
+    if (events_get_handler_count(EVENT_BEFORE_DEAL_DAMAGE) > 0) {
+        fire_before_deal_damage_event(statsSystem, hit, attack);
+    }
+
+    g_OrigThrowDamageEvent(statsSystem, entityView, hit, attack, ability, flag);
 }
 
 // =============================================================================
@@ -427,15 +478,29 @@ bool functor_hooks_init(void) {
         LOG_HOOKS_ERROR("  Failed to hook Interrupt @ 0x%llx", (unsigned long long)addr);
     }
 
-    // Install ProcessDealDamageFunctors hook
-    addr = get_runtime_addr(GAME_FN_PROCESS_DEAL_DAMAGE_FUNCTORS);
-    if (addr && DobbyHook((void*)addr, (void*)hook_ProcessDealDamageFunctors,
-                          (void**)&g_OrigProcessDealDamage) == 0) {
-        LOG_HOOKS_DEBUG("  ProcessDealDamageFunctors hook @ 0x%llx",
+    // Install DealDamage hooks. Both addresses come from the version row and
+    // are 0 on every build where they were not derived from that binary, so
+    // get_runtime_addr returns NULL and the hook is skipped rather than
+    // patching whatever function happens to live at a borrowed address.
+    addr = get_runtime_addr(GAME_FN_DEAL_DAMAGE_APPLY_DAMAGE);
+    if (addr && DobbyHook((void*)addr, (void*)hook_DealDamageFunctor_ApplyDamage,
+                          (void**)&g_OrigDealDamageApply) == 0) {
+        LOG_HOOKS_DEBUG("  DealDamageFunctor::ApplyDamage hook @ 0x%llx",
                         (unsigned long long)addr);
         success_count++;
     } else {
-        LOG_HOOKS_ERROR("  Failed to hook ProcessDealDamageFunctors @ 0x%llx",
+        LOG_HOOKS_ERROR("  Failed to hook DealDamageFunctor::ApplyDamage @ 0x%llx",
+                        (unsigned long long)addr);
+    }
+
+    addr = get_runtime_addr(GAME_FN_STATS_SYSTEM_THROW_DAMAGE_EVENT);
+    if (addr && DobbyHook((void*)addr, (void*)hook_StatsSystem_ThrowDamageEvent,
+                          (void**)&g_OrigThrowDamageEvent) == 0) {
+        LOG_HOOKS_DEBUG("  StatsSystem::ThrowDamageEvent hook @ 0x%llx",
+                        (unsigned long long)addr);
+        success_count++;
+    } else {
+        LOG_HOOKS_ERROR("  Failed to hook StatsSystem::ThrowDamageEvent @ 0x%llx",
                         (unsigned long long)addr);
     }
 
@@ -443,8 +508,8 @@ bool functor_hooks_init(void) {
     g_InstalledCount = success_count;
     if (success_count > 0 && success_count < FUNCTOR_HOOK_TARGET_COUNT) {
         // Partial installs break paired event semantics silently (a missing
-        // ProcessDealDamageFunctors hook means BeforeDealDamage/DealDamage
-        // never fire despite successful subscriptions) — make it loud.
+        // DealDamage hook means DealDamage/DealtDamage never fire despite
+        // successful subscriptions) — make it loud.
         LOG_HOOKS_ERROR("Functor hooks PARTIAL install: %d/%d — some functor "
                         "contexts will not fire events",
                         success_count, FUNCTOR_HOOK_TARGET_COUNT);

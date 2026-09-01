@@ -370,14 +370,17 @@ typedef struct {
 // Function Addresses (ARM64 macOS)
 // =============================================================================
 
-// The game build these eleven addresses and their wrapper ABIs were verified
+// The game build the hook addresses and their wrapper ABIs were verified
 // against. The functions are nm-visible LOCAL symbols (plain `nm`, without
 // `-g`), but symbol resolution only proves the address, not the ABI. main.c
 // therefore gates hook installation on an exact match against this constant,
 // independent of BG3_KNOWN_VERSION. Unknown builds remain fail-closed.
-// 7398727: Wave 2C re-verified all eleven entry windows byte-identical and
-// the wrapper register contracts unchanged (ghidra/offsets/
-// ABI_REVIEW_7398727.md §1). Addresses come from the offset table row.
+// 7398727: Wave 2C re-verified the nine ExecuteStatsFunctors entry windows
+// byte-identical and their wrapper register contracts unchanged
+// (ghidra/offsets/ABI_REVIEW_7398727.md §1); the two DealDamage targets added
+// 2026-09-02 were derived and ABI-verified directly on this build
+// (ghidra/offsets/DEALDAMAGE_HOOKS.md). Eleven installed hooks in total.
+// Addresses come from the offset table row.
 #define FUNCTOR_ADDRS_VERIFIED_BUILD "4.1.1.7398727"
 
 // HISTORICAL (7209685 VAs) — no longer consumed by any hook installer;
@@ -454,10 +457,113 @@ typedef void (*ExecuteStatsFunctorProc)(
     AttackTargetContextData* context
 );
 
+// =============================================================================
+// DealDamage / DealtDamage / BeforeDealDamage hook targets
+// =============================================================================
+//
+// esv::functor::StatsFunctorDealDamage::Execute (the ecs::EntityRef target
+// overload) is the macOS counterpart of the function Windows BG3SE hooks as
+// stats::DealDamageFunctor::ApplyDamage. Identified on 4.1.1.7398727 by a
+// one-for-one match of its seventeen explicit parameters against Windows'
+// DealDamageFunctor__ApplyDamageProc, in order; the two parameters Windows
+// could only type as `__int64 a17` and `bool` demangle here as
+// `ls::ID<ecs::EntityHandleTraits> const&` and `eoc::EHitWith`.
+// Derivation and instruction citations: ghidra/offsets/DEALDAMAGE_HOOKS.md.
+//
+// Machine ABI, verified against this build's callee prologue (0x105773558) and
+// a complete call site (0x1049e5890):
+//
+//   x0            hidden HitResult output object   <-- x0 on this build, NOT x8
+//   x1..x7        parameters 1..7
+//   [x29+0x10..]  parameters 8..17
+//
+// Two separate ABI hazards live in that list, both of which silently corrupt
+// every argument behind them rather than failing:
+//
+//  1. result_out. Same hidden leading output object as the nine
+//     ExecuteStatsFunctors wrappers: it is invisible in the demangled name
+//     because C++ does not mangle return types. Dropping it shifts x1..x7 down
+//     one register and the original body runs on garbage — the exact 2026-07-29
+//     SIGSEGV in docs/bugs/wave2-functor-crash-analysis.md. Accept it first,
+//     forward it unchanged, never dereference it, and return what the original
+//     returned (AAPCS leaves the result address in x0 on return).
+//
+//  2. The small stack-passed types. Apple's arm64 ABI packs stack arguments to
+//     their natural size instead of giving each an 8-byte slot, so `hitWith`
+//     really is one byte at +0x28 (the call site emits `strb w9,[sp,#0x28]`),
+//     `conditionRollIndex` sits at +0x2c and `entityDamagedEvent` at +0x30.
+//     Widening hitWith to int would push conditionRollIndex to +0x30 and drag
+//     the last four arguments — including the two pointers — out of place.
+//     DealDamageStackArgsLayout below pins these offsets; tier0 asserts them.
+typedef void *(*DealDamageApplyDamageProc)(
+    void*        result_out,
+    const void*  functor,           // eoc::StatsFunctorDealDamage const&
+    const void*  casterRef,         // ecs::EntityRef const&
+    const void*  targetRef,         // ecs::EntityRef const&
+    const void*  position,          // Vector3f const&
+    bool         isFromItem,
+    const void*  spellId,           // eoc::spell::SpellInfo const&
+    uint32_t     storyActionId,     // ls::TypeWrap<unsigned int, ...> by value
+    const void*  originator,        // eoc::ActionOriginator const&
+    const void*  classDescriptions, // eoc::ClassDescriptions const&
+    const void*  hit,               // eoc::HitDesc const&
+    const void*  attack,            // eoc::AttackDesc const&
+    const void*  sourceHandle2,     // ls::ID<ecs::EntityHandleTraits> const&
+    uint8_t      hitWith,           // eoc::EHitWith  (ONE byte, see hazard 2)
+    int32_t      conditionRollIndex,
+    bool         entityDamagedEvent,
+    const void*  sourceHandle3,     // ls::ID<ecs::EntityHandleTraits> const&
+    const void*  spellId2           // eoc::spell::SpellId const&
+);
+
+// Mirror of the stack-passed tail (parameters 8..17) of
+// DealDamageApplyDamageProc. C struct layout on Apple arm64 reproduces the
+// ABI's stack packing for this sequence, so offsetof() here equals the byte
+// offset of each argument from the first stack slot. tier0 pins every offset
+// to the value read off the 7398727 call site, so a future edit to the proc
+// typedef that changes a parameter's width fails a test instead of shifting
+// live arguments in the game.
+typedef struct {
+    const void* originator;         // +0x00
+    const void* classDescriptions;  // +0x08
+    const void* hit;                // +0x10
+    const void* attack;             // +0x18
+    const void* sourceHandle2;      // +0x20
+    uint8_t     hitWith;            // +0x28
+    int32_t     conditionRollIndex; // +0x2c
+    bool        entityDamagedEvent; // +0x30
+    const void* sourceHandle3;      // +0x38
+    const void* spellId2;           // +0x40
+} DealDamageStackArgsLayout;
+
+// esv::StatsSystem::ApplyDamage — the macOS counterpart of the function
+// Windows BG3SE hooks as esv::StatsSystem::ThrowDamageEvent for its
+// BeforeDealDamage event. Two independent corroborations on 7398727: it is
+// called from inside StatsFunctorDealDamage::Execute (0x105774c14), and the
+// instruction immediately after that call loads
+// ls::TypeId<esv::PassiveSystem, ecs::SystemsContext>::m_TypeIndex, matching
+// the "near ref to PassiveSystemID" note on Windows' own binary signature for
+// this call site. Its argument shape matches Windows'
+// (statsSystem, temp5, hit, attack, a5, a6) with a5 typed here as EAbility.
+// All six arguments are register-passed, so no stack packing is involved.
+typedef void (*StatsSystemThrowDamageEventProc)(
+    void*        statsSystem,
+    const void*  entityView,        // ecs::EntityRefView<...> const&
+    void*        hit,               // eoc::HitDesc&
+    void*        attack,            // eoc::AttackDesc&
+    uint8_t      ability,           // EAbility
+    bool         flag
+);
+
 // (anonymous namespace)::ProcessDealDamageFunctors. All C++ const-reference
 // parameters are pointers at the C ABI boundary. Only `eventIndex` is passed
 // by value. Opaque context arguments must not be dereferenced without a
 // separately verified layout.
+//
+// NO LONGER HOOKED. It used to source BeforeDealDamage/DealDamage, but it does
+// not receive the Windows ApplyDamage payload, so those events carried a
+// mostly-nil table. Both now come from the two targets above. The typedef and
+// the ADDR_/GAME_FN_ entries stay as documented recon.
 typedef void (*ProcessDealDamageFunctorsProc)(
     void*                   worldView,
     const StatsFunctorBase* functor,

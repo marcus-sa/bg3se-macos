@@ -388,6 +388,7 @@ if(BUILD_TESTS)
         tests/tier0/test_lua_runtime.c
         tests/tier0/test_guid_lookup.c
         tests/tier0/test_user_variables.c
+        tests/tier0/test_deal_damage_abi.c
         tests/tier0/stub_logging.c
         src/core/safe_memory.c
         src/entity/guid_lookup.c
@@ -406,6 +407,7 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/mod
         ${CMAKE_SOURCE_DIR}/src/lua
         ${CMAKE_SOURCE_DIR}/src/vars
+        ${CMAKE_SOURCE_DIR}/src/stats
         ${LUA_SRC_DIR}
     )
     target_link_libraries(bg3se_test_tier0 PRIVATE lua_static "-framework Foundation")

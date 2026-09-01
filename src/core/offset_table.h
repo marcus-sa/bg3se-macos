@@ -36,6 +36,16 @@ typedef enum GameFunctionId {
     GAME_FN_EXECUTE_FUNCTORS_SOURCE,
     GAME_FN_EXECUTE_FUNCTORS_INTERRUPT,
     GAME_FN_PROCESS_DEAL_DAMAGE_FUNCTORS,
+    // esv::functor::StatsFunctorDealDamage::Execute (EntityRef target overload)
+    // == Windows stats::DealDamageFunctor::ApplyDamage. Sources DealDamage and
+    // DealtDamage. 0 on any row where the address was not derived from that
+    // binary, which makes offset_table_game_fn() return NULL and leaves the
+    // hook uninstalled — a wrong address here resolves to a live unrelated
+    // function rather than failing.
+    GAME_FN_DEAL_DAMAGE_APPLY_DAMAGE,
+    // esv::StatsSystem::ApplyDamage == Windows esv::StatsSystem::ThrowDamageEvent.
+    // Sources BeforeDealDamage. Same fail-closed rule.
+    GAME_FN_STATS_SYSTEM_THROW_DAMAGE_EVENT,
     GAME_FN_TRANSLATED_STRING_TRY_GET,
     GAME_FN_TRANSLATED_STRING_GET,
     GAME_FN_TRANSLATED_STRING_ADD,

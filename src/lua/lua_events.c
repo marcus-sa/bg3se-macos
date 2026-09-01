@@ -14,6 +14,7 @@
 #include "lua_gate.h"
 #include "lua_runtime.h"
 #include "../core/logging.h"
+#include "../core/safe_memory.h"
 #include "../mod/mod_loader.h"
 #include "../entity/component_registry.h"
 #include "../entity/component_lookup.h"
@@ -1735,32 +1736,122 @@ static void set_nil_field(lua_State *L, const char *field) {
     lua_setfield(L, -2, field);
 }
 
-void events_fire_damage(
-    lua_State *L,
-    BG3SEEventType event,
-    void *worldView,
-    void *functor,
-    uint64_t entity,
-    const void *position,
-    const void *spellState,
-    const void *damageEffectFlags,
-    const void *ability,
-    const void *spellAttackType,
-    const void *dependency1,
-    const void *dependency2,
-    int eventIndex,
-    void *interruptEvents
-) {
-    if (!L || (event != EVENT_BEFORE_DEAL_DAMAGE && event != EVENT_DEAL_DAMAGE)) {
+/*
+ * Windows hands Lua a bound userdata for each of these engine objects. We have
+ * the verified address (it is a hook argument) but no independently verified
+ * member layout on this build, so the value is a table carrying only `Ptr`.
+ * That keeps `event.Functor` / `event.Hit` indexable — a mod written against
+ * the documented API indexes them on its first line, which is precisely what
+ * used to raise "attempt to index a nil value (field 'Functor')" — while any
+ * member read returns nil instead of a number decoded from a guessed offset.
+ */
+static void set_opaque_object_field(lua_State *L, const char *field, const void *ptr) {
+    if (!ptr) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, field);
+        return;
+    }
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)(uintptr_t)ptr);
+    lua_setfield(L, -2, "Ptr");
+    lua_setfield(L, -2, field);
+}
+
+/*
+ * ecs::EntityRef is {EntityHandle Handle; EntityWorld* World;} — the +0/+8
+ * layout is documented in functor_types.h and re-confirmed on 7398727 inside
+ * the hooked function itself, which does `ldp x1, x0, [ref]` to feed
+ * EntityWorld::GetComponent(world, handle). ls::ID<EntityHandleTraits> is the
+ * bare 8-byte handle, so the same read with offset 0 covers both.
+ */
+static void set_entity_handle_field(lua_State *L, const char *field, const void *ref) {
+    uint64_t handle = 0;
+    if (ref && safe_memory_read_u64((mach_vm_address_t)(uintptr_t)ref, &handle)) {
+        lua_pushinteger(L, (lua_Integer)handle);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_setfield(L, -2, field);
+}
+
+static void set_position_field(lua_State *L, const char *field, const void *position) {
+    float xyz[3];
+    if (!position ||
+        !safe_memory_read((mach_vm_address_t)(uintptr_t)position, xyz, sizeof xyz)) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, field);
+        return;
+    }
+    lua_newtable(L);
+    static const char *const kAxis[3] = {"x", "y", "z"};
+    for (int i = 0; i < 3; i++) {
+        lua_pushnumber(L, (lua_Number)xyz[i]);
+        lua_setfield(L, -2, kAxis[i]);
+        lua_pushnumber(L, (lua_Number)xyz[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, field);
+}
+
+static void push_deal_damage_payload(lua_State *L, BG3SEEventType event,
+                                     const DealDamageEventData *d) {
+    lua_newtable(L);
+
+    /* The hook target is StatsFunctorDealDamage::Execute, so the functor is a
+     * DealDamage functor by construction. TypeId therefore comes from the hook
+     * site, not from a read through StatsFunctorBase+0x3C. */
+    set_opaque_object_field(L, "Functor", d->functor);
+    lua_getfield(L, -1, "Functor");
+    if (lua_istable(L, -1)) {
+        lua_pushinteger(L, FUNCTOR_ID_DEAL_DAMAGE);
+        lua_setfield(L, -2, "TypeId");
+        lua_pushstring(L, "DealDamage");
+        lua_setfield(L, -2, "Type");
+    }
+    lua_pop(L, 1);
+
+    set_entity_handle_field(L, "Caster", d->casterRef);
+    set_entity_handle_field(L, "Target", d->targetRef);
+    /* Windows' Caster2 — the separate source handle argument, not a second
+     * read of Caster. */
+    set_entity_handle_field(L, "Caster2", d->sourceHandle2);
+    set_position_field(L, "Position", d->position);
+
+    lua_pushboolean(L, d->isFromItem);
+    lua_setfield(L, -2, "IsFromItem");
+    lua_pushinteger(L, (lua_Integer)d->storyActionId);
+    lua_setfield(L, -2, "StoryActionId");
+    lua_pushinteger(L, (lua_Integer)d->hitWith);
+    lua_setfield(L, -2, "HitWith");
+    lua_pushinteger(L, (lua_Integer)d->conditionRollIndex);
+    lua_setfield(L, -2, "ConditionRollIndex");
+
+    set_opaque_object_field(L, "SpellId", d->spellId);
+    set_opaque_object_field(L, "SpellId2", d->spellId2);
+    set_opaque_object_field(L, "Originator", d->originator);
+    set_opaque_object_field(L, "Hit", d->hit);
+    set_opaque_object_field(L, "Attack", d->attack);
+
+    /* Windows carries Result on DealtDamage only; before the original runs the
+     * output object is uninitialized, so exposing it would be a lie. */
+    if (event == EVENT_DEALT_DAMAGE) {
+        set_opaque_object_field(L, "Result", d->result);
+    } else {
+        set_nil_field(L, "Result");
+    }
+}
+
+void events_fire_deal_damage(lua_State *L, BG3SEEventType event,
+                             const DealDamageEventData *d) {
+    if (!L || !d || (event != EVENT_DEAL_DAMAGE && event != EVENT_DEALT_DAMAGE)) {
         return;
     }
 
     int count = g_handler_counts[event];
     if (count == 0) return;
 
-    LOG_EVENTS_DEBUG(
-        "Firing %s (functor=%p, entity=0x%llx, %d handlers)",
-        g_event_names[event], functor, (unsigned long long)entity, count);
+    LOG_EVENTS_DEBUG("Firing %s (functor=%p, %d handlers)",
+                     g_event_names[event], d->functor, count);
 
     g_dispatch_depth[event]++;
 
@@ -1781,40 +1872,13 @@ void events_fire_damage(
             continue;
         }
 
-        lua_newtable(L);
-        set_pointer_field(L, "FunctorPtr", functor);
-        lua_pushinteger(L, (lua_Integer)entity);
-        lua_setfield(L, -2, "Entity");
-        set_pointer_field(L, "WorldViewPtr", worldView);
-        set_pointer_field(L, "PositionOptionalPtr", position);
-        set_pointer_field(L, "SpellStatePtr", spellState);
-        set_pointer_field(L, "DamageEffectFlagsPtr", damageEffectFlags);
-        set_pointer_field(L, "AbilityPtr", ability);
-        set_pointer_field(L, "SpellAttackTypePtr", spellAttackType);
-        set_pointer_field(L, "Dependency1Ptr", dependency1);
-        set_pointer_field(L, "Dependency2Ptr", dependency2);
-        lua_pushinteger(L, eventIndex);
-        lua_setfield(L, -2, "InterruptEventIndex");
-        set_pointer_field(L, "InterruptEventsPtr", interruptEvents);
-
-        // ProcessDealDamageFunctors does not receive the Windows ApplyDamage
-        // payload. Leave those semantic fields explicitly nil until their
-        // layouts and provenance are independently verified.
-        set_nil_field(L, "Functor");
-        set_nil_field(L, "Hit");
-        set_nil_field(L, "Attack");
-        set_nil_field(L, "Position");
-        set_nil_field(L, "DamageEffectFlags");
-        set_nil_field(L, "Ability");
-        set_nil_field(L, "SpellAttackType");
-        set_nil_field(L, "Result");
+        push_deal_damage_payload(L, event, d);
 
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
             const char *err = lua_tostring(L, -1);
-            LOG_EVENTS_ERROR(
-                "%s handler error (id=%llu, mod=%s): %s",
-                g_event_names[event], h->handler_id, h->mod_name,
-                err ? err : "unknown");
+            LOG_EVENTS_ERROR("%s handler error (id=%llu, mod=%s): %s",
+                             g_event_names[event], h->handler_id, h->mod_name,
+                             err ? err : "unknown");
             mod_health_record_error(h->mod_name, err);
             lua_pop(L, 1);
         } else {
@@ -1831,6 +1895,65 @@ void events_fire_damage(
     g_dispatch_depth[event]--;
     if (g_dispatch_depth[event] == 0) {
         process_deferred_unsubscribes(L, event);
+    }
+}
+
+void events_fire_before_deal_damage(lua_State *L, void *statsSystem,
+                                    const void *hit, const void *attack) {
+    if (!L) return;
+
+    int count = g_handler_counts[EVENT_BEFORE_DEAL_DAMAGE];
+    if (count == 0) return;
+
+    LOG_EVENTS_DEBUG("Firing BeforeDealDamage (hit=%p, attack=%p, %d handlers)",
+                     hit, attack, count);
+
+    g_dispatch_depth[EVENT_BEFORE_DEAL_DAMAGE]++;
+
+    for (int i = 0; i < g_handler_counts[EVENT_BEFORE_DEAL_DAMAGE]; i++) {
+        EventHandler *h = &g_handlers[EVENT_BEFORE_DEAL_DAMAGE][i];
+        if (h->callback_ref == LUA_NOREF || h->callback_ref == LUA_REFNIL) {
+            continue;
+        }
+
+        ModHealthEntry *mh = mod_health_get_or_create(h->mod_name);
+        if (mh && mh->soft_disabled) continue;
+
+        event_scope_begin(L, h->mod_name);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, h->callback_ref);
+        if (!lua_isfunction(L, -1)) {
+            lua_pop(L, 1);
+            event_scope_end(L);
+            continue;
+        }
+
+        lua_newtable(L);
+        set_opaque_object_field(L, "Hit", hit);
+        set_opaque_object_field(L, "Attack", attack);
+        /* Not part of the Windows payload; exposed as a plain address for
+         * diagnostics, matching the *Ptr convention used elsewhere here. */
+        set_pointer_field(L, "StatsSystemPtr", statsSystem);
+
+        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            const char *err = lua_tostring(L, -1);
+            LOG_EVENTS_ERROR("BeforeDealDamage handler error (id=%llu, mod=%s): %s",
+                             h->handler_id, h->mod_name, err ? err : "unknown");
+            mod_health_record_error(h->mod_name, err);
+            lua_pop(L, 1);
+        } else {
+            mod_health_record_success(h->mod_name);
+        }
+
+        event_scope_end(L);
+        if (h->once && g_deferred_unsub_count < MAX_DEFERRED_OPERATIONS) {
+            g_deferred_unsubs[g_deferred_unsub_count++] =
+                (DeferredUnsubscribe){EVENT_BEFORE_DEAL_DAMAGE, h->handler_id};
+        }
+    }
+
+    g_dispatch_depth[EVENT_BEFORE_DEAL_DAMAGE]--;
+    if (g_dispatch_depth[EVENT_BEFORE_DEAL_DAMAGE] == 0) {
+        process_deferred_unsubscribes(L, EVENT_BEFORE_DEAL_DAMAGE);
     }
 }
 

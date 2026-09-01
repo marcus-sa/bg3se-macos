@@ -91,13 +91,14 @@ void ProcessDealDamageFunctors(
         ls::TaggedAllocator<int>>& interruptEvents);
 ```
 
-`functor_hooks.c` fires `BeforeDealDamage` before this function and
-`DealDamage` after it returns. The event payload safely copies the entity ID and
-the by-value `eventIndex`, and exposes opaque pointer fields for all reference
-arguments. `Hit`, `Attack`, `Position`, `DamageEffectFlags`, `Ability`,
-`SpellAttackType`, and `Result` remain explicitly nil because this signature
-does not provide the Windows `ApplyDamage` payload and the opaque layouts have
-not been independently verified.
+**Superseded as a hook target (2026-09-02).** `functor_hooks.c` used to fire
+`BeforeDealDamage` before this function and `DealDamage` after it, but this
+signature does not carry the Windows `ApplyDamage` payload, so the event table
+was mostly nil and mods failed on their first field read. The three damage
+events now come from the two targets in
+[DEALDAMAGE_HOOKS.md](DEALDAMAGE_HOOKS.md), matching what Windows BG3SE hooks.
+`ProcessDealDamageFunctors` is no longer hooked; its address stays in the offset
+table and manifest as recon.
 
 ### Corrected old attribution
 

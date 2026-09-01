@@ -322,6 +322,24 @@
    "symbol": "(anonymous namespace)::ProcessDealDamageFunctors(ecs::WorldView<eoc::repose::StateComponent const, ls::PhysicsComponent const, ls::TransformComponent const, ls::uuid::Component const>&, eoc::StatsFunctorBase const&, ls::ID<ecs::EntityHandleTraits> const&, ls::Optional<Vector3f> const&, eoc::spell_cast::StateComponent const&, ls::EnumFlags<eoc::EDamageEffectFlag> const&, EAbility const&, ESpellAttackType const&, eoc::interrupt::Dependency const&, eoc::interrupt::Dependency const&, int, ls::DynamicArray<eoc::interrupt::InterruptEvent, ls::TaggedAllocator<int>>&)"
   },
   {
+   "id": "GAME_FN_DEAL_DAMAGE_APPLY_DAMAGE",
+   "name": "StatsFunctorDealDamage::Execute (== Windows DealDamageFunctor::ApplyDamage)",
+   "addresses": {
+    "4.1.1.7398727": "0x105773558"
+   },
+   "symbol": "esv::functor::StatsFunctorDealDamage::Execute(eoc::StatsFunctorDealDamage const&, ecs::EntityRef const&, ecs::EntityRef const&, Vector3f const&, bool, eoc::spell::SpellInfo const&, ls::TypeWrap<unsigned int, eoc::TStoryActionIDClassname, true>, eoc::ActionOriginator const&, eoc::ClassDescriptions const&, eoc::HitDesc const&, eoc::AttackDesc const&, ls::ID<ecs::EntityHandleTraits> const&, eoc::EHitWith, int, bool, ls::ID<ecs::EntityHandleTraits> const&, eoc::spell::SpellId const&)",
+   "_note": "Sources the DealDamage and DealtDamage Lua events. Deliberately has no 6995620/7209685 address: neither was derived on its own binary, and offset_table_game_fn() returning NULL leaves the hook uninstalled instead of patching a borrowed address. There is a second Execute overload (position/radius, 0x105777aa0) that is NOT this target. Full register/stack ABI: ghidra/offsets/DEALDAMAGE_HOOKS.md."
+  },
+  {
+   "id": "GAME_FN_STATS_SYSTEM_THROW_DAMAGE_EVENT",
+   "name": "StatsSystem::ApplyDamage (== Windows StatsSystem::ThrowDamageEvent)",
+   "addresses": {
+    "4.1.1.7398727": "0x1057c3aa0"
+   },
+   "symbol": "esv::StatsSystem::ApplyDamage(ecs::EntityRefView<eoc::ResistancesComponent const, eoc::TagComponent const, eoc::BoostsContainerComponent, eoc::DataComponent, eoc::HealthComponent> const&, eoc::HitDesc&, eoc::AttackDesc&, EAbility, bool)",
+   "_note": "Sources the BeforeDealDamage Lua event. Same deliberate omission from the older rows. Corroborated as the Windows ThrowDamageEvent target by its call site inside StatsFunctorDealDamage::Execute (0x105774c14), immediately followed by a load of ls::TypeId<esv::PassiveSystem, ecs::SystemsContext>::m_TypeIndex \u2014 the 'near ref to PassiveSystemID' anchor in Windows' own BinaryMappings.xml signature."
+  },
+  {
    "id": "GAME_FN_TRANSLATED_STRING_TRY_GET",
    "name": "TranslatedStringRepository::TryGet",
    "addresses": {
@@ -519,7 +537,7 @@
    "baseline": "0x08ac0278",
    "method": "symbol",
    "symbol": "BaseApp::s_AppInstance",
-   "note": "moved from focus_hack.c hardcoded VA 2026-08-04; baseline is the 7209685 value — the 6995620 row is 0 (focus hack postdates that vintage). focus_hack.c WRITES through the pointer read here; unknown builds must stay 0."
+   "note": "moved from focus_hack.c hardcoded VA 2026-08-04; baseline is the 7209685 value \u2014 the 6995620 row is 0 (focus hack postdates that vintage). focus_hack.c WRITES through the pointer read here; unknown builds must stay 0."
   }
  ],
  "source_addresses": [

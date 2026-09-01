@@ -325,6 +325,16 @@ static const VersionOffsets g_offset_table[] = {
             [GAME_FN_EXECUTE_FUNCTORS_SOURCE] = 0x0578d6a8,
             [GAME_FN_EXECUTE_FUNCTORS_INTERRUPT] = 0x057911fc,
             [GAME_FN_PROCESS_DEAL_DAMAGE_FUNCTORS] = 0x05389568,
+            /* esv::functor::StatsFunctorDealDamage::Execute — exact arm64 nm on
+             * this binary; full register/stack ABI re-derived by disassembly
+             * (ghidra/offsets/DEALDAMAGE_HOOKS.md). Deliberately absent from
+             * the 6995620 and 7209685 rows: neither was derived on its own
+             * binary, and a borrowed address would land on a different live
+             * function instead of failing. */
+            [GAME_FN_DEAL_DAMAGE_APPLY_DAMAGE] = 0x05773558,
+            /* esv::StatsSystem::ApplyDamage — same provenance and same
+             * deliberate omission from the older rows. */
+            [GAME_FN_STATS_SYSTEM_THROW_DAMAGE_EVENT] = 0x057c3aa0,
             [GAME_FN_TRANSLATED_STRING_TRY_GET] = 0x0654bb4c,
             [GAME_FN_TRANSLATED_STRING_GET] = 0x0654bf40,
             [GAME_FN_TRANSLATED_STRING_ADD] = 0x06549388,
