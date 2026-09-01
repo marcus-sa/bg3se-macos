@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 // ls::ShaderManager::GetShader(FixedString const&) — local symbol, exact-build
 // address (4.1.1.7398727). Returns a 64-bit ShaderID; a miss returns the
@@ -88,7 +89,14 @@ static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
         return id;
     }
 
-    char base[256];
+    // Shader names arrive as full filesystem paths, not bare material names:
+    // a Steam library path plus Public/<mod-uuid>/Assets/Materials/... reaches
+    // ~310 chars before the material name even starts. At 256 the strip below
+    // bailed on its length guard, the clone was logged as "no clone pattern",
+    // and the miss stood -- which is the unbounded AddPipelineState yield loop
+    // this shim exists to prevent. Sized for PATH_MAX; the guard still fails
+    // closed above it.
+    char base[PATH_MAX];
     if (!strip_uuid_segment(name, base, sizeof(base))) {
         // Genuine miss with no clone shape — log it: these are the shader
         // names whose NullHandle IDs end up in pipeline descriptors.
