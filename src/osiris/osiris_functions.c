@@ -1054,8 +1054,17 @@ const char *osi_func_get_name(uint32_t funcId) {
         return cached;
     }
 
-    /* Not enumerated yet -- fall back to the hardcoded bootstrap mapping. */
-    if (s_knownEvents) {
+    /* Cache populated but this id is not in it. Do NOT borrow a name from the
+     * hardcoded table here: those ids come from an older build, and one that is
+     * absent from this build's function manager is precisely the case where it
+     * now denotes something else. Returning the stale name mis-attributes a
+     * live function and dispatches mods' listeners for it -- exactly how
+     * 0x800021F3 kept being reported as AutomatedDialogStarted on 4.1.1.7398727
+     * while the real event is 0x80000F53. Unknown is the honest answer.
+     *
+     * Before enumeration has run the cache is empty and the table is all we
+     * have, so it stays available for that bootstrap window only. */
+    if (g_funcCacheCount == 0 && s_knownEvents) {
         for (int i = 0; s_knownEvents[i].name != NULL; i++) {
             if (s_knownEvents[i].funcId == funcId) {
                 return s_knownEvents[i].name;
@@ -1132,8 +1141,10 @@ uint32_t osi_func_lookup_id(const char *name) {
     }
 
     // Bootstrap fallback only: before enumeration has run there is no cache to
-    // consult, and a hardcoded id is better than nothing.
-    if (s_knownEvents) {
+    // consult, and a hardcoded id is better than nothing. Once the cache exists
+    // it is authoritative, and a stale id would resolve to the wrong live
+    // function rather than to nothing.
+    if (g_funcCacheCount == 0 && s_knownEvents) {
         for (int i = 0; s_knownEvents[i].name != NULL; i++) {
             if (strcmp(s_knownEvents[i].name, name) == 0 && s_knownEvents[i].funcId != 0) {
                 return s_knownEvents[i].funcId;
