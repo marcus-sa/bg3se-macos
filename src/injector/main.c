@@ -1830,82 +1830,153 @@ static bool osi_db_resolve(void *def, void **outNode, void **outDb,
     return true;
 }
 
-/* Locate the value array of a stored fact. CTuple (inline at listnode+0x10)
- * is a COsiSOOList<COsiTypedValue,8>: size @ +0x80, cap @ +0x84; values are
- * stored INLINE at the tuple base when cap < 9, else the tuple base holds a
- * heap pointer. Returns 0 on read failure. */
-/* Every column of a real COsiTypedValue array carries a declared Osiris type at
- * +0x08. Type 0 (NONE), or anything past the custom GUID subtypes, means the
- * address is not a value array -- we are reading the wrong side of the tuple.
- * Cheap, and it is the only local signal that distinguishes the two layouts. */
-#define OSI_TYPE_MAX_PLAUSIBLE 64
+/* ---- Declared database column types --------------------------------------
+ *
+ * A CReteDBase carries its own signature, and it is the only trustworthy answer
+ * to "what type is column i". Layout from libOsiris arm64
+ * CReteDBase::_CommonPartOfConstructors (0x6b258): it push_back's every entry
+ * of the COsiValueTypeList into a std::vector<TOsiValueType> at db+0x28, then
+ * stores the entry count as a byte at db+0x40 -- the very field osi_db_resolve
+ * already reads as colCount. CReteDBase::Write (0x6b368 / x86 0x73290) pins the
+ * element width: it derives the count as (end - begin) >> 1 and streams each
+ * element through COsiSmartBuf::write(TOsiValueType), so TOsiValueType is a u16
+ * and the vector is {begin @ +0x28, end @ +0x30}.
+ *
+ * Returns the column count, or -1 if the vector cannot be read or disagrees
+ * with db+0x40 (layout drift after a game update) -- callers then fall back to
+ * osi_db_types_plausible rather than dropping every row. */
+static int osi_db_declared_types(void *db, uint16_t *out, int maxOut) {
+    if (!db || !out || maxOut <= 0) return -1;
 
+    void *begin = NULL, *end = NULL;
+    if (!safe_memory_read_pointer((mach_vm_address_t)db + 0x28, &begin) || !begin) return -1;
+    if (!safe_memory_read_pointer((mach_vm_address_t)db + 0x30, &end) || !end) return -1;
+    if ((uintptr_t)end < (uintptr_t)begin) return -1;
+
+    size_t bytes = (size_t)((uintptr_t)end - (uintptr_t)begin);
+    if (bytes % sizeof(uint16_t)) return -1;
+    size_t count = bytes / sizeof(uint16_t);
+
+    uint8_t numParams = 0;
+    safe_memory_read_u8((mach_vm_address_t)db + 0x40, &numParams);
+    if (count == 0 || count != (size_t)numParams || count > (size_t)maxOut) return -1;
+
+    for (size_t i = 0; i < count; i++) {
+        uint16_t t = 0;
+        if (!safe_memory_read((mach_vm_address_t)begin + i * sizeof(uint16_t),
+                              &t, sizeof(t))) return -1;
+        if (osi_type_decode_class(t) == 0) return -1;   /* not a type word */
+        out[i] = t;
+    }
+    return (int)count;
+}
+
+/* Every stored column must be readable as the column the database declared.
+ * This is the guard that would have caught DB_Avatars: a CHARACTERGUID column
+ * holding a value tagged INTEGER is a misread, not a row. */
+static bool osi_db_types_declared_ok(mach_vm_address_t values, uint8_t colCount,
+                                     const uint16_t *decl, int nDecl) {
+    if (!values || colCount == 0 || !decl || nDecl < (int)colCount) return false;
+    for (uint32_t i = 0; i < colCount; i++) {
+        uint16_t t = 0;
+        if (!safe_memory_read(values + (mach_vm_address_t)i * 0x10 + 0x08,
+                              &t, sizeof(t))) return false;
+        if (!osi_type_matches_declared(t, decl[i])) return false;
+    }
+    return true;
+}
+
+/* Fallback for when the declared types are unavailable (osi_db_declared_types
+ * returned -1). It only asserts that each column carries *some* usable type id,
+ * which 1 (INTEGER) trivially satisfies, so it cannot catch a struct field
+ * being misread as a value -- it exists purely so a future layout change in the
+ * ParamTypes vector degrades to the previous behaviour instead of emptying
+ * every database. */
 static bool osi_db_types_plausible(mach_vm_address_t values, uint8_t colCount) {
     if (!values || colCount == 0) return false;
     for (uint32_t i = 0; i < colCount; i++) {
         uint16_t t = 0;
         if (!safe_memory_read(values + (mach_vm_address_t)i * 0x10 + 0x08,
                               &t, sizeof(t))) return false;
-        if (t == OSI_TYPE_NONE || t > OSI_TYPE_MAX_PLAUSIBLE) return false;
+        if (osi_type_decode_class(t) == 0) return false;
     }
     return true;
 }
 
 /* Locate the value array of a stored fact.
  *
- * CTuple is a COsiSOOList<COsiTypedValue,8>: size @ +0x80, cap @ +0x84, values
- * inline at the tuple base when cap < 9, else the base holds a heap pointer.
- * That model came from static review, and trusting the cap field alone was
- * wrong in practice: DB_Avatars decoded its single GUID column as INTEGER and
- * handed mods the low 32 bits of the value (-942419056), which Sit This One Out
- * then passed to Osi.AddPassive / SetOnStage / RemoveStatus -- every call
- * refused, so the avatar silently never received the mod's passives. Sibling
- * reads in the same millisecond (DB_PartyMembers, DB_Players) decoded fine, so
- * the cap heuristic picks the wrong side for some tuples, not all.
+ * CTuple is NOT the COsiSOOList<COsiTypedValue,8> this reader used to assume.
+ * It is { COsiTypedValue *Values @ +0x00; uint64 Size @ +0x08; uint32 Cap @
+ * +0x10 } -- 0x18 bytes, embedded at listNode+0x10. Four independent libOsiris
+ * arm64 functions agree: COsiColumnIdxValuePairList::From (0x43d78),
+ * CTuple::Read (0x43a74) and CTuple::_Log (0x65b6c) all take the count from
+ * t+0x08 and element i from *(t+0x00) + i*0x10, and CReteDBase::_insert
+ * (0x5e880) copies exactly those three fields into its 0x28-byte list node.
+ * The Delete path below already builds a CTuple in that shape, from
+ * CReteStartNode::Del.
  *
- * So verify instead of trusting: take the branch cap indicates, check the
- * declared column types actually look like an Osiris value array, and fall back
- * to the other branch if they do not. If neither validates, return 0 -- the row
- * is skipped rather than emitted as garbage, because a bogus character handed
- * to a mod is worse than a missing row. */
+ * The SOO model is what produced the corruption. t+0x80/+0x84 are far past the
+ * end of a 0x18-byte tuple, so "cap" was whatever the neighbouring heap held.
+ * Where it happened to read < 9 the reader took the tuple header itself for the
+ * value array, and column 0 decoded as { value = the Values pointer, type =
+ * Size }: for a one-column database Size is 1 == INTEGER, which sailed through
+ * the old plausibility check, so DB_Avatars handed Sit This One Out the low half
+ * of a heap pointer (-942419056) as its character and every AddPassive /
+ * SetOnStage / RemoveStatus on it was refused. A later session's three rows
+ * differed by exactly 16 (-432089584/-568/-552) because those were consecutive
+ * COsiTypedValue allocations. Where the neighbouring garbage read >= 9 the heap
+ * branch was taken and decoded correctly -- which is why DB_PartyMembers and
+ * DB_Players were fine in the same millisecond.
+ *
+ * Reading the true layout is the fix; validating against the database's own
+ * declared column types is the guard that keeps a future layout drift from
+ * silently fabricating values again. Returns 0 (row skipped) if anything fails
+ * to validate: a short result is recoverable for a mod, a bogus character is
+ * not. */
 static mach_vm_address_t osi_db_tuple_values(mach_vm_address_t listNode,
-                                             uint32_t *outSize,
-                                             uint8_t colCount) {
+                                             uint64_t *outSize,
+                                             uint8_t colCount,
+                                             const uint16_t *decl, int nDecl) {
     mach_vm_address_t tuple = listNode + 0x10;
-    uint32_t tsize = 0, tcap = 0;
-    safe_memory_read_u32(tuple + 0x80, &tsize);
-    safe_memory_read_u32(tuple + 0x84, &tcap);
-    *outSize = tsize;
+    if (outSize) *outSize = 0;
 
-    void *heap = NULL;
-    safe_memory_read_pointer(tuple, &heap);
+    void *values = NULL;
+    uint64_t tsize = 0;
+    if (!safe_memory_read_pointer(tuple, &values) || !values) return 0;
+    if (!safe_memory_read_u64(tuple + 0x08, &tsize)) return 0;
+    if (outSize) *outSize = tsize;
 
-    mach_vm_address_t byCap  = (tcap >= 9) ? (mach_vm_address_t)heap : tuple;
-    mach_vm_address_t other  = (tcap >= 9) ? tuple : (mach_vm_address_t)heap;
-
-    if (osi_db_types_plausible(byCap, colCount)) return byCap;
-
-    if (osi_db_types_plausible(other, colCount)) {
-        static int warned = 0;
-        if (warned < 4) {
-            warned++;
-            LOG_OSIRIS_WARN("Osi DB: tuple cap=%u selected the %s layout but its "
-                            "column types are invalid; the %s layout validates. "
-                            "Using it. (size=%u cols=%u)",
-                            tcap, (tcap >= 9) ? "heap" : "inline",
-                            (tcap >= 9) ? "inline" : "heap", tsize, colCount);
+    /* A fact carries exactly the database's declared columns -- CReteDBase::
+     * _insert indexes the tuple over db+0x40 entries -- so a short tuple means
+     * this is not a fact of this database. */
+    if (tsize < colCount || tsize > 64) {
+        static int badSize = 0;
+        if (badSize < 4) {
+            badSize++;
+            LOG_OSIRIS_WARN("Osi DB: fact tuple holds %llu values but the "
+                            "database declares %u columns — skipping row",
+                            (unsigned long long)tsize, colCount);
         }
-        return other;
+        return 0;
     }
 
-    static int dropped = 0;
-    if (dropped < 4) {
-        dropped++;
-        LOG_OSIRIS_WARN("Osi DB: neither tuple layout yields valid column types "
-                        "(cap=%u size=%u cols=%u) — skipping row rather than "
-                        "returning garbage to Lua", tcap, tsize, colCount);
+    mach_vm_address_t v = (mach_vm_address_t)values;
+    bool ok = (decl && nDecl > 0)
+                  ? osi_db_types_declared_ok(v, colCount, decl, nDecl)
+                  : osi_db_types_plausible(v, colCount);
+    if (!ok) {
+        static int dropped = 0;
+        if (dropped < 4) {
+            dropped++;
+            LOG_OSIRIS_WARN("Osi DB: fact columns do not match the database's "
+                            "%s types (size=%llu cols=%u) — skipping row rather "
+                            "than returning garbage to Lua",
+                            (decl && nDecl > 0) ? "declared" : "expected",
+                            (unsigned long long)tsize, colCount);
+        }
+        return 0;
     }
-    return 0;
+    return v;
 }
 
 /* Compare Lua stack slots 2..(1+nfilter) against a stored value array.
@@ -2066,6 +2137,21 @@ static int osi_db_read_facts(lua_State *L, void *def, const char *dbName) {
     uint8_t colCount = 0;
     if (!osi_db_resolve(def, &node, &db, &colCount)) return 1;
 
+    /* The database's own signature is the oracle for the tuple layout check.
+     * -1 (unavailable) is not fatal: osi_db_tuple_values then falls back to the
+     * weaker plausibility guard rather than dropping every row. */
+    uint16_t declTypes[32];
+    int nDecl = osi_db_declared_types(db, declTypes, 32);
+    if (nDecl < 0) {
+        static int noDecl = 0;
+        if (noDecl < 4) {
+            noDecl++;
+            LOG_OSIRIS_WARN("Osi DB: %s declares %u columns but its ParamTypes "
+                            "vector is unreadable — falling back to weak column "
+                            "validation", dbName ? dbName : "DB_?", colCount);
+        }
+    }
+
     /* Walk the fact list (std::list<CTuple> sentinel @ db+0x10). */
     mach_vm_address_t sentinel = (mach_vm_address_t)db + 0x10;
     void *cur = NULL;
@@ -2075,13 +2161,14 @@ static int osi_db_read_facts(lua_State *L, void *def, const char *dbName) {
     while (cur && (mach_vm_address_t)cur != sentinel && rowCount < 100000 && guard < 500000) {
         guard++;
 
-        uint32_t tsize = 0;
-        // osi_db_tuple_values validates the column types, so a non-zero return
-        // is already known to point at a real value array; tsize is only a
-        // corroborating signal and is not trusted on its own (it comes from the
-        // same struct whose layout was the problem).
+        uint64_t tsize = 0;
+        // osi_db_tuple_values validates every column against the database's
+        // declared types, so a non-zero return already points at a real value
+        // array.
         mach_vm_address_t values = osi_db_tuple_values((mach_vm_address_t)cur,
-                                                       &tsize, colCount);
+                                                       &tsize, colCount,
+                                                       nDecl > 0 ? declTypes : NULL,
+                                                       nDecl);
         int match = values != 0
                     && osi_db_tuple_matches(L, values, colCount, nfilter);
 
@@ -2219,6 +2306,9 @@ static int lua_osi_db_delete(lua_State *L) {
         return 0;
     }
 
+    uint16_t declTypes[32];
+    int nDecl = osi_db_declared_types(db, declTypes, 32);
+
     /* Find the first stored row matching all columns exactly. */
     mach_vm_address_t sentinel = (mach_vm_address_t)db + 0x10;
     void *cur = NULL;
@@ -2228,9 +2318,11 @@ static int lua_osi_db_delete(lua_State *L) {
     int guard = 0;
     while (cur && (mach_vm_address_t)cur != sentinel && guard < 500000) {
         guard++;
-        uint32_t tsize = 0;
+        uint64_t tsize = 0;
         mach_vm_address_t values = osi_db_tuple_values((mach_vm_address_t)cur,
-                                                       &tsize, colCount);
+                                                       &tsize, colCount,
+                                                       nDecl > 0 ? declTypes : NULL,
+                                                       nDecl);
         if (values != 0
             && osi_db_tuple_matches(L, values, colCount, nargs)) {
             matched = values;

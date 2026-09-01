@@ -54,7 +54,7 @@ struct Database { uint32_t DatabaseId; void* FactsVMT; List<TupleVec> Facts; Vec
 ## FULL RESOLUTION CHAIN — VERIFIED via libOsiris arm64 disassembly (2026-07-12)
 
 macOS Osiris uses `CReteDBase` (the database, holds a `std::list<CTuple>`),
-`CTuple` = `COsiSOOList<COsiTypedValue,8>`, `COsiTypedValue` (16 bytes).
+`CTuple` = `{ COsiTypedValue *values; u64 size; u32 cap; }`, `COsiTypedValue` (16 bytes).
 All offsets below are from disassembly of the named functions.
 
 **Globals** (libOsiris file offsets; runtime = libOsirisBase + off;
@@ -74,12 +74,35 @@ libOsirisBase = &`_OsiFunctionMan` − 0x9f348, or dlsym `_ReteNodeFactory`):
 4. `dbmgr = *(base+0x9f5b0)`; `db = *( *(dbmgr+0x08) + (dbId-1)*8 )` = **CReteDBase**.
    Validate `u32 @ db+0x00 == dbId`.
 5. **Facts** (std::list<CTuple> embedded at `db+0x10` sentinel):
-   - `count = u32 @ db+0x20`; `first = ptr @ db+0x18`; end sentinel = `db+0x10`.
+   - `count = u64 @ db+0x20`; `first = ptr @ db+0x18`; end sentinel = `db+0x10`
+     (sentinel is `{prev @ +0x00, next @ +0x08}`, so `first` == the sentinel's next).
    - list node: `__next_ = ptr @ n+0x08`; **CTuple value @ n+0x10**.
    - iterate: `n = first; while (n != db+0x10) { tuple = n+0x10; n = *(n+0x08); }`.
-6. **CTuple** = `COsiSOOList<COsiTypedValue,8>`:
-   - `size = u32 @ tuple+0x80`; `cap = u32 @ tuple+0x84`;
-   - `data = (cap < 9) ? (tuple+0x00) : *(tuple+0x00)`; column i at `data + i*0x10`.
+6. **CTuple** is **NOT** a `COsiSOOList<COsiTypedValue,8>` (that was a misread of
+   `COsiColumnIdxValuePairList`, which *is* an SOO list). CTuple is 0x18 bytes:
+   - `values = ptr @ tuple+0x00`; `size = u64 @ tuple+0x08`; `cap = u32 @ tuple+0x10`;
+   - column i at `values + i*0x10` — always through the pointer, never inline.
+   - VERIFIED four ways: `COsiColumnIdxValuePairList::From(CTuple const&)` @ 0x43d78,
+     `CTuple::Read` @ 0x43a74 and `CTuple::_Log` @ 0x65b6c all take the count from
+     `t+0x08` and element i from `*(t+0x00) + i*0x10`; `CReteDBase::_insert` @ 0x5e880
+     copies exactly those three fields into its 0x28-byte list node; and
+     `CReteStartNode::Del` @ 0x5f42c (the Delete path) builds one in that shape.
+   - ⚠️ The SOO model caused live corruption: `tuple+0x80/+0x84` are past the end of
+     the tuple, so "cap" was neighbouring heap. When it read < 9 the reader treated
+     the tuple header as the value array and column 0 decoded as
+     `{ value = the values pointer, type = size }` — for a 1-column DB that is
+     type 1 (INTEGER), so `DB_Avatars:Get()` returned `-942419056` (the low half of a
+     heap pointer) as a CHARACTERGUID.
+
+6b. **Declared column types** (`CReteDBase::ParamTypes`), the oracle for validating
+   a decoded row — from `CReteDBase::_CommonPartOfConstructors` @ 0x6b258, which
+   push_backs each `COsiValueTypeList` entry into a `std::vector<TOsiValueType>` at
+   `db+0x28` and then stores the count as the byte at `db+0x40` (= `colCount`):
+   - `begin = ptr @ db+0x28`; `end = ptr @ db+0x30`; `count = (end - begin) / 2`.
+   - `TOsiValueType` is a **u16** — `CReteDBase::Write` @ 0x6b368 derives the count
+     as `(end - begin) >> 1` and streams each element via
+     `COsiSmartBuf::write(TOsiValueType)`.
+   - `count` must equal `u8 @ db+0x40`; a mismatch means layout drift.
 7. **COsiTypedValue** (16 bytes): `typeId = u16 @ tv+0x08`; `value = 8 bytes @ tv+0x00`
    (char* for STRING/GUIDSTRING & custom GUID subtypes; int64 for INTEGER; float for REAL).
    Read *(tv+0x00) as ptr → C string for string types; else numeric.

@@ -12,6 +12,7 @@ jmp_buf g_test_jmp;
 void register_safe_memory_tests(void);
 void register_pattern_scan_tests(void);
 void register_osiris_handle_tests(void);
+void register_osiris_db_type_tests(void);
 void register_entity_events_tests(void);
 void register_mod_paths_tests(void);
 void register_lua_runtime_tests(void);
@@ -24,6 +25,7 @@ int main(void) {
     register_safe_memory_tests();
     register_pattern_scan_tests();
     register_osiris_handle_tests();
+    register_osiris_db_type_tests();
     register_entity_events_tests();
     register_mod_paths_tests();
     register_lua_runtime_tests();

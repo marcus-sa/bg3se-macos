@@ -382,6 +382,7 @@ if(BUILD_TESTS)
         tests/tier0/test_safe_memory.c
         tests/tier0/test_pattern_scan.c
         tests/tier0/test_osiris_handles.c
+        tests/tier0/test_osiris_db_types.c
         tests/tier0/test_entity_events.c
         tests/tier0/test_mod_paths.c
         tests/tier0/test_lua_runtime.c

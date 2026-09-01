@@ -27,6 +27,42 @@ typedef enum {
     OSI_TYPE_GUIDSTRING = 5
 } OsiValueType;
 
+// Osiris "custom" types (CHARACTERGUID, ITEMGUID, ...) are ids allocated above
+// GUIDSTRING by DefineAliasedType; libOsiris' TOsiValueType is a u16 and a
+// story defines at most a few dozen aliases. A type word past this bound is not
+// a type word at all -- it is some other field being misread.
+#define OSI_TYPE_MAX_PLAUSIBLE 64
+
+// How a COsiTypedValue of this type has to be read out of memory. Types in the
+// same class are byte-for-byte interchangeable to a reader; types in different
+// classes are not, and mixing them is exactly the DB_Avatars corruption --
+// a string handle read as an int32 handed Lua -942419056 as a character GUID.
+// Returns 0 for anything that cannot be a value type.
+static inline uint8_t osi_type_decode_class(uint16_t type) {
+    switch (type) {
+        case OSI_TYPE_NONE:      return 0;
+        case OSI_TYPE_INTEGER:   return 1;
+        case OSI_TYPE_INTEGER64: return 2;
+        case OSI_TYPE_REAL:      return 3;
+        default:
+            // STRING, GUIDSTRING and every aliased GUID subtype store a
+            // COsiStringHandle, so they all read out the same way.
+            return (type <= OSI_TYPE_MAX_PLAUSIBLE) ? 4 : 0;
+    }
+}
+
+// Does a value stored in a database fact agree with the type that database
+// declared for the column? Exact equality is the normal case. The class
+// fallback exists because Osiris aliases GUID subtypes freely (a GUIDSTRING
+// value under a declared CHARACTERGUID column is the same 8 bytes), and
+// rejecting that would empty databases that decode perfectly well.
+static inline int osi_type_matches_declared(uint16_t stored, uint16_t declared) {
+    uint8_t cs = osi_type_decode_class(stored);
+    uint8_t cd = osi_type_decode_class(declared);
+    if (cs == 0 || cd == 0) return 0;
+    return (stored == declared) || (cs == cd);
+}
+
 // ============================================================================
 // Function Types
 // ============================================================================
