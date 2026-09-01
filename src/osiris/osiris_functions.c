@@ -990,27 +990,76 @@ void osi_func_enumerate_by_name(void) {
 // Lookup
 // ============================================================================
 
-const char *osi_func_get_name(uint32_t funcId) {
-    // Check known events table first (hardcoded mappings)
-    if (s_knownEvents) {
-        for (int i = 0; s_knownEvents[i].name != NULL; i++) {
-            if (s_knownEvents[i].funcId == funcId) {
-                return s_knownEvents[i].name;
-            }
-        }
-    }
-
-    // Check hash table (fast path for dynamic cache)
+/* Resolve an id from the enumerated cache only (no hardcoded fallback). */
+static const char *osi_func_get_name_cached(uint32_t funcId) {
     int hash = func_id_hash(funcId);
     int32_t idx = g_funcIdHashTable[hash];
     if (idx >= 0 && g_funcCache[idx].id == funcId) {
         return g_funcCache[idx].name;
     }
-
-    // Linear search (for hash collisions)
     for (int i = 0; i < g_funcCacheCount; i++) {
         if (g_funcCache[i].id == funcId) {
             return g_funcCache[i].name;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * The cache wins over the hardcoded table.
+ *
+ * s_knownEvents carries ids captured from an earlier build. They go stale on a
+ * game update, and a stale id does not fail safely: it still matches some
+ * function in the new build, just a different one. Checking it first therefore
+ * MIS-NAMES a live function, and dispatch_event_to_lua matches listeners by
+ * name -- so mods registered for the borrowed name are invoked with another
+ * event's arguments, while the real event's listeners never fire at all.
+ *
+ * Observed on 4.1.1.7398727: the table hardcodes AutomatedDialogStarted as
+ * 0x800021F3 and AutomatedDialogEnded as 0x800021FB, but this build raises them
+ * as 0x80000F53 / 0x80000F6B. Both ids appeared in one session under the same
+ * name, and AppearanceEditEnhanced's dialog handler was being handed
+ * status-shaped arguments (object, status, causee, storyActionID).
+ *
+ * The cache is read from the running game's own function manager, so it is
+ * authoritative whenever it has an entry. The hardcoded table stays as a
+ * bootstrap fallback for the window before enumeration completes.
+ */
+const char *osi_func_get_name(uint32_t funcId) {
+    const char *cached = osi_func_get_name_cached(funcId);
+    if (cached) {
+        /* Surface staleness once per offending entry rather than silently
+         * diverging: this is how a game update announces itself. */
+        if (s_knownEvents) {
+            for (int i = 0; s_knownEvents[i].name != NULL; i++) {
+                if (s_knownEvents[i].funcId == funcId &&
+                    strcmp(s_knownEvents[i].name, cached) != 0) {
+                    static uint32_t warnedIds[16];
+                    static int warnedCount = 0;
+                    bool seen = false;
+                    for (int w = 0; w < warnedCount; w++) {
+                        if (warnedIds[w] == funcId) { seen = true; break; }
+                    }
+                    if (!seen && warnedCount < 16) {
+                        warnedIds[warnedCount++] = funcId;
+                        LOG_OSIRIS_WARN("Known-event table is stale: id 0x%08x is "
+                                        "'%s' in this build, table says '%s'. "
+                                        "Using the enumerated name.",
+                                        funcId, cached, s_knownEvents[i].name);
+                    }
+                    break;
+                }
+            }
+        }
+        return cached;
+    }
+
+    /* Not enumerated yet -- fall back to the hardcoded bootstrap mapping. */
+    if (s_knownEvents) {
+        for (int i = 0; s_knownEvents[i].name != NULL; i++) {
+            if (s_knownEvents[i].funcId == funcId) {
+                return s_knownEvents[i].name;
+            }
         }
     }
 
@@ -1062,17 +1111,11 @@ bool osi_func_refresh_if_stale(void) {
     return gained > 0;
 }
 
+/* Name -> id, cache first for the same reason as osi_func_get_name: a stale
+ * hardcoded id resolves to the wrong live function rather than to nothing, so
+ * dispatching on it would call into whatever now occupies that slot. */
 uint32_t osi_func_lookup_id(const char *name) {
     if (!name) return INVALID_FUNCTION_ID;
-
-    // Check known events first (fast path for common names)
-    if (s_knownEvents) {
-        for (int i = 0; s_knownEvents[i].name != NULL; i++) {
-            if (strcmp(s_knownEvents[i].name, name) == 0 && s_knownEvents[i].funcId != 0) {
-                return s_knownEvents[i].funcId;
-            }
-        }
-    }
 
     // Fast path: name hash table
     int hash = func_name_hash(name);
@@ -1085,6 +1128,16 @@ uint32_t osi_func_lookup_id(const char *name) {
     for (int i = 0; i < g_funcCacheCount; i++) {
         if (strcmp(g_funcCache[i].name, name) == 0) {
             return g_funcCache[i].id;
+        }
+    }
+
+    // Bootstrap fallback only: before enumeration has run there is no cache to
+    // consult, and a hardcoded id is better than nothing.
+    if (s_knownEvents) {
+        for (int i = 0; s_knownEvents[i].name != NULL; i++) {
+            if (strcmp(s_knownEvents[i].name, name) == 0 && s_knownEvents[i].funcId != 0) {
+                return s_knownEvents[i].funcId;
+            }
         }
     }
 
