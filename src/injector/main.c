@@ -4524,26 +4524,11 @@ static void dispatch_event_to_lua(const char *eventName, int arity,
                 continue;
             }
 
-            // Name the callback's source before entering it. A mod handler
-            // that hangs parks the game thread inside this pcall while holding
-            // the Lua gate -- the render thread keeps ticking, so the log ends
-            // mid-dispatch with no indication of WHICH listener it entered.
-            // Emitting source:line first makes that last line name the culprit.
-            // lua_getinfo("S") only reads the closure's prototype; no stack
-            // walk, and this sits alongside a log line that already fires once
-            // per listener per event.
-            {
-                lua_Debug ar;
-                const char *src = "?";
-                int defline = -1;
-                lua_pushvalue(L, -1);
-                if (lua_getinfo(L, ">S", &ar)) {
-                    src = ar.short_src;
-                    defline = ar.linedefined;
-                }
-                LOG_OSIRIS_DEBUG("Dispatching %s callback (%s, arity=%d) -> %s:%d",
-                           eventName, timing, listener->arity, src, defline);
-            }
+            // Once per listener per event: with a large mod profile this is
+            // tens of thousands of lines a minute at INFO, which buries
+            // everything else in the log.
+            LOG_OSIRIS_DEBUG("Dispatching %s callback (%s, arity=%d)",
+                       eventName, timing, listener->arity);
 
             // Begin lifetime scope for this callback
             LifetimeHandle scope = lifetime_lua_begin_scope(L);
