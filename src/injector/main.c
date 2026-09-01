@@ -253,8 +253,17 @@ static KnownFunction g_knownFunctions[] = {
     // =========================================================================
     // Events (OSI_FUNC_EVENT = 1) - discovered via runtime observation
     // =========================================================================
-    {"AutomatedDialogStarted", 2147492339, 4, OSI_FUNC_EVENT},  // 0x800021f3
-    {"AutomatedDialogEnded", 2147492347, 4, OSI_FUNC_EVENT},    // 0x800021fb
+    // Id 0 means "learn it at runtime": osi_func_cache backfills the real id on
+    // discovery. These two were the only entries carrying a hardcoded id, and
+    // both were captured from an older build -- 0x800021f3 / 0x800021fb are
+    // StatusAttempt and StatusAttemptFailed on 4.1.1.7398727, while the dialog
+    // events are 0x80000f53 / 0x80000f6b. A stale id does not fail safely: it
+    // matches a different live function, so every StatusAttempt was reported as
+    // AutomatedDialogStarted and dispatched to mods' dialog handlers with
+    // status-shaped arguments. Backfilled ids cannot go stale; hardcoded ones
+    // silently do, which is why none are kept here.
+    {"AutomatedDialogStarted", 0, 4, OSI_FUNC_EVENT},
+    {"AutomatedDialogEnded", 0, 4, OSI_FUNC_EVENT},
     {"DialogStarted", 0, 2, OSI_FUNC_EVENT},
     {"DialogEnded", 0, 2, OSI_FUNC_EVENT},
     {"CharacterJoinedParty", 0, 1, OSI_FUNC_EVENT},
