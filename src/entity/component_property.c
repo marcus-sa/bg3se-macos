@@ -24,6 +24,9 @@
 #include "../core/logging.h"
 #include "../lifetime/lifetime.h"
 #include "../strings/fixed_string.h"
+#include "../enum/enum_registry.h"
+#include "guid_lookup.h"
+#include "spell_meta_layout.h"
 
 #include <limits.h>
 #include <math.h>
@@ -1153,6 +1156,107 @@ static bool array_proxy_read_metadata(ArrayProxy *proxy, void **buf_out, uint32_
     return true;
 }
 
+// ============================================================================
+// SpellMeta element decoding
+// ============================================================================
+
+/*
+ * An index the global string table cannot resolve (GST not built yet, or a
+ * stale index) is pushed as nil, not as its raw u32. Mods compare these against
+ * prototype names; a number there would compare unequal to every name forever
+ * while looking like a successfully decoded field.
+ */
+static void spell_meta_set_fixed_string(lua_State *L, uintptr_t elemAddr,
+                                        unsigned off, const char *key) {
+    uint32_t fsIndex = 0;
+    const char *str = NULL;
+    if (safe_memory_read_u32((mach_vm_address_t)(elemAddr + off), &fsIndex)) {
+        str = fixed_string_resolve(fsIndex);
+    }
+    if (str) {
+        lua_pushstring(L, str);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_setfield(L, -2, key);
+}
+
+/*
+ * Uses guid_to_string rather than the raw-byte "%02x%02x..." formatting the
+ * FIELD_TYPE_GUID / ELEM_TYPE_GUID paths above use. The two disagree, and
+ * guid_to_string is the one that inverts guid_parse — i.e. the one that yields
+ * UUID text a mod can match against or hand back to the game.
+ */
+static void spell_meta_set_guid(lua_State *L, uintptr_t elemAddr,
+                                unsigned off, const char *key) {
+    Guid guid = {0, 0};
+    if (safe_memory_read((mach_vm_address_t)(elemAddr + off), &guid, sizeof(guid))) {
+        char guidStr[40] = {0};
+        guid_to_string(&guid, guidStr);
+        lua_pushstring(L, guidStr);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_setfield(L, -2, key);
+}
+
+static void spell_meta_set_entity_handle(lua_State *L, uintptr_t elemAddr,
+                                         unsigned off, const char *key) {
+    uint64_t handle = 0;
+    if (safe_memory_read((mach_vm_address_t)(elemAddr + off), &handle, sizeof(handle))) {
+        char handleStr[32];
+        snprintf(handleStr, sizeof(handleStr), "0x%llx", (unsigned long long)handle);
+        lua_pushstring(L, handleStr);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_setfield(L, -2, key);
+}
+
+/*
+ * Enum fields surface as the string label Windows BG3SE exposes, because that
+ * is what mods compare against (spell.SpellCastingAbility == "Intelligence").
+ * enumTypeName == NULL means the value's label set could not be justified for
+ * this game build; the raw ordinal is pushed then. A number is a visible
+ * mismatch the mod author can debug, where nil turns the next field access into
+ * an "index a nil value" error somewhere else entirely — the exact failure this
+ * decoder exists to remove.
+ */
+static void spell_meta_set_enum_u8(lua_State *L, uintptr_t elemAddr,
+                                   unsigned off, const char *key,
+                                   const char *enumTypeName) {
+    uint8_t value = 0;
+    if (!safe_memory_read((mach_vm_address_t)(elemAddr + off), &value, sizeof(value))) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, key);
+        return;
+    }
+
+    const char *label = NULL;
+    if (enumTypeName) {
+        EnumTypeInfo *info = enum_registry_find_by_name(enumTypeName);
+        if (info) label = enum_find_label(info->registry_index, (uint64_t)value);
+    }
+
+    if (label) {
+        lua_pushstring(L, label);
+    } else {
+        lua_pushinteger(L, (lua_Integer)value);
+    }
+    lua_setfield(L, -2, key);
+}
+
+static void spell_meta_set_bool(lua_State *L, uintptr_t elemAddr,
+                                unsigned off, const char *key) {
+    uint8_t value = 0;
+    if (safe_memory_read((mach_vm_address_t)(elemAddr + off), &value, sizeof(value))) {
+        lua_pushboolean(L, value != 0);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_setfield(L, -2, key);
+}
+
 // Push a single array element to Lua stack
 static int array_proxy_push_element(lua_State *L, ArrayProxy *proxy, void *buf, uint32_t index) {
     if (!buf || proxy->elemSize == 0) {
@@ -1278,8 +1382,77 @@ static int array_proxy_push_element(lua_State *L, ArrayProxy *proxy, void *buf, 
             return 1;
         }
 
+        case ELEM_TYPE_SPELL_META: {
+            /*
+             * eoc::spell::SpellMeta. Field offsets and the 0x60 stride are
+             * pinned, with their disassembly citations, in spell_meta_layout.h;
+             * tier0's test_spell_meta_layout.c holds those constants against a
+             * compiler-computed mirror of the struct.
+             *
+             * This used to fall into the generic stub branch below, so
+             * SpellContainer.Spells[i] came back with only __ptr/__index/__size
+             * and every documented field nil — which is what made
+             * spell.SpellId.OriginatorPrototype an index-a-nil error on every
+             * EnteredForceTurnBased.
+             */
+            char addrBuf[32];
+            snprintf(addrBuf, sizeof(addrBuf), "0x%llx", (unsigned long long)elemAddr);
+
+            lua_createtable(L, 0, 12);
+
+            lua_pushstring(L, addrBuf);
+            lua_setfield(L, -2, "__ptr");
+            lua_pushinteger(L, index + 1);
+            lua_setfield(L, -2, "__index");
+            lua_pushinteger(L, proxy->elemSize);
+            lua_setfield(L, -2, "__size");
+
+            // SpellId is eoc::spell::MetaId embedded at offset 0. Mods index
+            // through it (spell.SpellId.OriginatorPrototype), so it has to be a
+            // nested table rather than flattened field names.
+            lua_createtable(L, 0, 5);
+            spell_meta_set_fixed_string(L, elemAddr,
+                                        SPELL_META_OFF_ORIGINATOR_PROTOTYPE,
+                                        "OriginatorPrototype");
+            /*
+             * SourceType's offset is verified, but 7398727 ships no name/value
+             * table for eoc::spell::ESourceType — no _Enum_SourceType in the
+             * khonsu registry and no StringTo... parser to read values off — so
+             * the Windows label set cannot be justified against this build and
+             * the raw ordinal is exposed instead of a guessed name.
+             */
+            spell_meta_set_enum_u8(L, elemAddr, SPELL_META_OFF_SOURCE_TYPE,
+                                   "SourceType", NULL);
+            spell_meta_set_guid(L, elemAddr, SPELL_META_OFF_SOURCE, "Source");
+            spell_meta_set_guid(L, elemAddr, SPELL_META_OFF_PROGRESSION_SOURCE,
+                                "ProgressionSource");
+            lua_pushstring(L, addrBuf);
+            lua_setfield(L, -2, "__ptr");
+            lua_setfield(L, -2, "SpellId");
+
+            spell_meta_set_entity_handle(L, elemAddr, SPELL_META_OFF_BOOST_HANDLE,
+                                         "BoostHandle");
+            // ELearningStrategy: same situation as ESourceType — offset
+            // verified, label set not, so this stays an ordinal.
+            spell_meta_set_enum_u8(L, elemAddr, SPELL_META_OFF_LEARNING_STRATEGY,
+                                   "LearningStrategy", NULL);
+            spell_meta_set_enum_u8(L, elemAddr, SPELL_META_OFF_PREPARE_TYPE,
+                                   "PrepareType", "SpellPrepareType");
+            spell_meta_set_guid(L, elemAddr, SPELL_META_OFF_CASTING_RESOURCE,
+                                "PreferredCastingResource");
+            spell_meta_set_enum_u8(L, elemAddr, SPELL_META_OFF_CASTING_ABILITY,
+                                   "SpellCastingAbility", "AbilityId");
+            spell_meta_set_enum_u8(L, elemAddr, SPELL_META_OFF_COOLDOWN_TYPE,
+                                   "CooldownType", "SpellCooldownType");
+            spell_meta_set_fixed_string(L, elemAddr, SPELL_META_OFF_CONTAINER_SPELL,
+                                        "ContainerSpell");
+            spell_meta_set_bool(L, elemAddr, SPELL_META_OFF_LINKED_CONTAINER,
+                                "LinkedSpellContainer");
+
+            return 1;
+        }
+
         case ELEM_TYPE_SPELL_DATA:
-        case ELEM_TYPE_SPELL_META:
         case ELEM_TYPE_STATUS_INFO:
         case ELEM_TYPE_UNKNOWN:
         default: {

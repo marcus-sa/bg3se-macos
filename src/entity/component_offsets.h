@@ -12,6 +12,7 @@
 
 #include "component_property.h"
 #include "generated_enums.h"
+#include "spell_meta_layout.h"  // SPELL_META_SIZE
 #include <stddef.h>  // For NULL
 
 // ============================================================================
@@ -728,12 +729,16 @@ static const ComponentLayoutDef g_EquipableComponent_Layout = {
 // ============================================================================
 // SpellContainerComponent (eoc::spell::ContainerComponent)
 // From: BG3Extender/GameDefinitions/Components/Spell.h:117-122
-// Note: Contains Array<SpellMeta>, exposed as count for now
+// Note: Contains Array<SpellMeta>; elements decode via ELEM_TYPE_SPELL_META
 // ============================================================================
 
 static const ComponentPropertyDef g_SpellContainerComponent_Properties[] = {
-    // Array<SpellMeta> Spells at 0x00 - SpellMeta is 80 bytes
-    { "Spells",     0x00, FIELD_TYPE_DYNAMIC_ARRAY, 0, false, ELEM_TYPE_SPELL_META, 80 },
+    // Array<SpellMeta> Spells at 0x00. sizeof(SpellMeta) is 0x60 on 7398727
+    // arm64, taken from the `mov w10, #0x60` stride in
+    // DynamicArray<eoc::spell::SpellMeta>::Reallocate (see spell_meta_layout.h).
+    // This read 80 until 2026-09: at that stride Spells[1] onwards land inside
+    // the previous element and every field after the first decodes as garbage.
+    { "Spells",     0x00, FIELD_TYPE_DYNAMIC_ARRAY, 0, false, ELEM_TYPE_SPELL_META, SPELL_META_SIZE },
     { "SpellCount", 0x0C, FIELD_TYPE_UINT32, 0, false, ELEM_TYPE_UNKNOWN, 0 },  // Array.size field
 };
 

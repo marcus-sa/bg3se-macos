@@ -34,6 +34,11 @@ static void register_damage_type(void) {
 
 // ============================================================================
 // AbilityId
+//
+// Confirmed against 4.1.1.7398727 arm64: the parallel tables
+// ls::anubis::game::_khonsu::_enum::_Enum_Ability::NAMES (0x10878f9a0, seven
+// {ptr,len} string views) and ::VALUES (0x107887564, seven int32) pair
+// None/Strength/Dexterity/Constitution/Intelligence/Wisdom/Charisma with 0..6.
 // ============================================================================
 static void register_ability_id(void) {
     int idx = enum_registry_add_type("AbilityId", false);
@@ -46,6 +51,54 @@ static void register_ability_id(void) {
     REG_VALUE(idx, "Intelligence", 4);
     REG_VALUE(idx, "Wisdom", 5);
     REG_VALUE(idx, "Charisma", 6);
+}
+
+// ============================================================================
+// SpellCooldownType
+//
+// Values read off eoc::StringToCooldownType @0x101f7d05c in the 4.1.1.7398727
+// arm64 slice: each accepted literal falls through to a `mov w0, #<value>`, and
+// an unmatched string returns 0. Do not take these from the Windows table
+// wholesale — 7398727 spells value 6 as UntilRestPerItem/OncePerRestPerItem,
+// where Windows BG3SE has the legacy name UntilPerRestPerItem. Every spelling
+// the game or Windows accepts is registered so name->value lookups through
+// Ext.Enums keep working; enum_find_label returns the first entry, so the
+// game's own name is listed first for each value.
+// ============================================================================
+static void register_spell_cooldown_type(void) {
+    int idx = enum_registry_add_type("SpellCooldownType", false);
+    if (idx < 0) return;
+
+    REG_VALUE(idx, "Default", 0);
+    REG_VALUE(idx, "OncePerTurn", 1);
+    REG_VALUE(idx, "OncePerCombat", 2);
+    REG_VALUE(idx, "UntilRest", 3);
+    REG_VALUE(idx, "OncePerTurnNoRealtime", 4);
+    REG_VALUE(idx, "UntilShortRest", 5);
+    REG_VALUE(idx, "UntilRestPerItem", 6);
+    REG_VALUE(idx, "OncePerShortRestPerItem", 7);
+    // Aliases the game's parser also accepts for the same values.
+    REG_VALUE(idx, "OncePerRestPerItem", 6);
+    REG_VALUE(idx, "UntilShortRestPerItem", 7);
+    // Windows BG3SE's legacy spelling of 6, kept so mods written against the
+    // Windows enum still resolve it by name.
+    REG_VALUE(idx, "UntilPerRestPerItem", 6);
+}
+
+// ============================================================================
+// SpellPrepareType
+//
+// Values read off eoc::spell::StringToPreparationStrategy @0x101f7da90
+// (7398727 arm64): "AlwaysPrepared" -> 0, "RequiresPreparation" -> 1, and any
+// unmatched string -> 2. Matches the Windows table.
+// ============================================================================
+static void register_spell_prepare_type(void) {
+    int idx = enum_registry_add_type("SpellPrepareType", false);
+    if (idx < 0) return;
+
+    REG_VALUE(idx, "AlwaysPrepared", 0);
+    REG_VALUE(idx, "RequiresPreparation", 1);
+    REG_VALUE(idx, "Unknown", 2);
 }
 
 // ============================================================================
@@ -478,6 +531,8 @@ void enum_register_definitions(void) {
     // Regular enums
     register_damage_type();
     register_ability_id();
+    register_spell_cooldown_type();
+    register_spell_prepare_type();
     register_skill_id();
     register_status_type();
     register_surface_type();
