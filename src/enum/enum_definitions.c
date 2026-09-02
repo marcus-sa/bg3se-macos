@@ -11,6 +11,23 @@
 
 // ============================================================================
 // DamageType
+//
+// Confirmed against 4.1.1.7398727 arm64 by two independent tables that agree
+// on all fourteen values, so nothing here rests on the Windows header:
+//
+//   Noesis::TypeEnumCreator<EDamageType>::Fill @0x10250eb68 registers the
+//   fourteen CamelCase names below against 0..13 with
+//   Noesis::TypeEnum::AddValue(Symbol, uint64).
+//
+//   ls::anubis::game::_khonsu::_enum::_Enum_DamageType::NAMES (0x108793fb8,
+//   fourteen {ptr,len} string views) / ::VALUES (0x107889a58, fourteen int32)
+//   pair the same fourteen entries, upper-cased, with the same 0..13.
+//
+// The Noesis spelling is the one registered: it is what mods compare against
+// (`damageType == "Fire"`), and it is a name this build ships, not a Windows
+// one. Values 15/16/17 also appear in the Noesis fill as Weapon/Spell/
+// HealAmount — stats-expression pseudo-types, not damage types a hit can
+// carry — and are deliberately left out.
 // ============================================================================
 static void register_damage_type(void) {
     int idx = enum_registry_add_type("DamageType", false);
@@ -453,6 +470,119 @@ static void register_damage_flags(void) {
 }
 
 // ============================================================================
+// SpellFlags (Bitfield)
+//
+// Read off 4.1.1.7398727 arm64, not from the Windows header:
+//   ls::thoth::shared::_khonsu::_enum::_Enum_SpellFlags::NAMES  @0x1086f4a60
+//     — 58 {const char*, size_t} string views (0x1086f4a60..0x1086f4e00)
+//   ls::thoth::shared::_khonsu::_enum::_Enum_SpellFlags::VALUES @0x10787d870
+//     — 58 uint64, one per name (0x10787d870..0x10787da40)
+//   ::FQDN @0x10787d852 reads "ls.thoth.shared.SpellFlags".
+//
+// The names below are that table verbatim, so they are what this build calls
+// each bit. Fourteen of them differ from the Windows BG3SE spelling and the
+// game's own name is registered first, which is what enum_find_label returns;
+// the Windows spellings follow as aliases so a mod written against the
+// documented API still resolves a name -> value lookup. Bit
+// 0x0000080000000000 (Windows: RangeIgnoreBlindness) has no entry in this
+// build's table and is therefore not registered under either spelling.
+//
+// Consumed by DealDamage's SpellId.SpellProto.SpellFlags, which decodes the
+// uint64 at eoc::SpellPrototype+0x10 (see src/stats/deal_damage_layout.h).
+// ============================================================================
+static void register_spell_flags(void) {
+    int idx = enum_registry_add_type("SpellFlags", true);
+    if (idx < 0) return;
+
+    EnumTypeInfo *info = enum_registry_get(idx);
+    if (info) {
+        // Bits 0..42 and 44..57 — bit 43 has no entry in this build's table.
+        info->allowed_flags = 0x03FFF7FFFFFFFFFFULL;
+    }
+
+    REG_VALUE(idx, "None", 0x0);
+    REG_VALUE(idx, "Verbal", 0x1);
+    REG_VALUE(idx, "Somatic", 0x2);
+    REG_VALUE(idx, "Jump", 0x4);
+    REG_VALUE(idx, "Attack", 0x8);
+    REG_VALUE(idx, "Melee", 0x10);
+    REG_VALUE(idx, "HighGroundRangeExtension", 0x20);
+    REG_VALUE(idx, "Concentration", 0x40);
+    REG_VALUE(idx, "FallDamage", 0x80);
+    REG_VALUE(idx, "ConcentrationIgnoresResting", 0x100);
+    REG_VALUE(idx, "InventorySelection", 0x200);
+    REG_VALUE(idx, "Spell", 0x400);
+    REG_VALUE(idx, "UNUSED_A", 0x800);
+    REG_VALUE(idx, "EnemySpell", 0x1000);
+    REG_VALUE(idx, "CannotTargetCharacter", 0x2000);
+    REG_VALUE(idx, "CannotTargetItem", 0x4000);
+    REG_VALUE(idx, "CannotTargetTerrain", 0x8000);
+    REG_VALUE(idx, "IgnoreVisionBlock", 0x10000);
+    REG_VALUE(idx, "Stealth", 0x20000);
+    REG_VALUE(idx, "AddWeaponRange", 0x40000);
+    REG_VALUE(idx, "IgnoreSilence", 0x80000);
+    REG_VALUE(idx, "ImmediateCast", 0x100000);
+    REG_VALUE(idx, "RangeIgnoreSourceBounds", 0x200000);
+    REG_VALUE(idx, "RangeIgnoreTargetBounds", 0x400000);
+    REG_VALUE(idx, "RangeIgnoreVerticalThreshold", 0x800000);
+    REG_VALUE(idx, "NoSurprise", 0x1000000);
+    REG_VALUE(idx, "Harmful", 0x2000000);
+    REG_VALUE(idx, "Trap", 0x4000000);
+    REG_VALUE(idx, "DefaultWeaponAction", 0x8000000);
+    REG_VALUE(idx, "UNUSED_B", 0x10000000);
+    REG_VALUE(idx, "TargetClosestEqualGroundSurface", 0x20000000);
+    REG_VALUE(idx, "CannotRotate", 0x40000000);
+    REG_VALUE(idx, "NoCameraMove", 0x80000000ULL);
+    REG_VALUE(idx, "CanDualWield", 0x100000000ULL);
+    REG_VALUE(idx, "IsLinkedSpellContainer", 0x200000000ULL);
+    REG_VALUE(idx, "Invisible", 0x400000000ULL);
+    REG_VALUE(idx, "AllowMoveAndCast", 0x800000000ULL);
+    REG_VALUE(idx, "UNUSED_D", 0x1000000000ULL);
+    REG_VALUE(idx, "WildShape", 0x2000000000ULL);
+    REG_VALUE(idx, "UNUSED_E", 0x4000000000ULL);
+    REG_VALUE(idx, "UnavailableInDialogs", 0x8000000000ULL);
+    REG_VALUE(idx, "UNUSED_F", 0x10000000000ULL);
+    REG_VALUE(idx, "PickupEntityAndMove", 0x20000000000ULL);
+    REG_VALUE(idx, "Temporary", 0x40000000000ULL);
+    REG_VALUE(idx, "AbortOnSpellRollFail", 0x100000000000ULL);
+    REG_VALUE(idx, "AbortOnSecondarySpellRollFail", 0x200000000000ULL);
+    REG_VALUE(idx, "CanAreaDamageEvade", 0x400000000000ULL);
+    REG_VALUE(idx, "DontAbortPerforming", 0x800000000000ULL);
+    REG_VALUE(idx, "NoCooldownOnMiss", 0x1000000000000ULL);
+    REG_VALUE(idx, "NoAOEDamageOnLand", 0x2000000000000ULL);
+    REG_VALUE(idx, "IsSwarmAttack", 0x4000000000000ULL);
+    REG_VALUE(idx, "DisplayInItemTooltip", 0x8000000000000ULL);
+    REG_VALUE(idx, "HideInItemTooltip", 0x10000000000000ULL);
+    REG_VALUE(idx, "DisableBlood", 0x20000000000000ULL);
+    REG_VALUE(idx, "IgnorePreviouslyPickedEntities", 0x40000000000000ULL);
+    REG_VALUE(idx, "IgnoreAoO", 0x80000000000000ULL);
+    REG_VALUE(idx, "DisplayDamageModifiers", 0x100000000000000ULL);
+    REG_VALUE(idx, "ChasmRecovery", 0x200000000000000ULL);
+
+    // Windows BG3SE spellings for the same bits. Registered after the game's
+    // own names so enum_find_label keeps returning the game name, while
+    // Ext.Enums.SpellFlags.IsSpell and friends still resolve.
+    REG_VALUE(idx, "HasVerbalComponent", 0x1);
+    REG_VALUE(idx, "HasSomaticComponent", 0x2);
+    REG_VALUE(idx, "IsJump", 0x4);
+    REG_VALUE(idx, "IsAttack", 0x8);
+    REG_VALUE(idx, "IsMelee", 0x10);
+    REG_VALUE(idx, "HasHighGroundRangeExtension", 0x20);
+    REG_VALUE(idx, "IsConcentration", 0x40);
+    REG_VALUE(idx, "AddFallDamageOnLand", 0x80);
+    REG_VALUE(idx, "IsSpell", 0x400);
+    REG_VALUE(idx, "CombatLogSetSingleLineRoll", 0x800);
+    REG_VALUE(idx, "IsEnemySpell", 0x1000);
+    REG_VALUE(idx, "CannotTargetItems", 0x4000);
+    REG_VALUE(idx, "IsHarmful", 0x2000000);
+    REG_VALUE(idx, "IsTrap", 0x4000000);
+    REG_VALUE(idx, "IsDefaultWeaponAction", 0x8000000);
+    REG_VALUE(idx, "CallAlliesSpell", 0x10000000);
+    REG_VALUE(idx, "Wildshape", 0x2000000000ULL);
+    REG_VALUE(idx, "TrajectoryRules", 0x10000000000ULL);
+}
+
+// ============================================================================
 // ClientGameState (ecl::GameState — Enumerations/Engine.inl)
 // ============================================================================
 // Required by the GameStateChanged event and Ext.Utils.GetGameState: mods
@@ -549,4 +679,5 @@ void enum_register_definitions(void) {
     register_attribute_flags();
     register_weapon_flags();
     register_damage_flags();
+    register_spell_flags();
 }

@@ -270,11 +270,22 @@ typedef struct {
  * Result set) from esv::functor::StatsFunctorDealDamage::Execute — the macOS
  * counterpart of the Windows DealDamageFunctor::ApplyDamage hook.
  *
- * Scalars and entity handles are pushed as values. Engine objects whose member
- * layouts are not independently verified on this build (Functor, SpellId,
- * Originator, Hit, Attack, SpellId2, Result) are pushed as tables carrying only
- * `Ptr`, so the documented field name exists and is indexable while every
- * member read yields nil rather than a fabricated number.
+ * Scalars are pushed as values. Caster / Target / Caster2 are the same entity
+ * objects Ext.Entity.Get returns (with the raw handle kept alongside as
+ * CasterHandle / TargetHandle / Caster2Handle). Functor, SpellId, SpellId2,
+ * Hit, Attack and Result are tables that always carry `Ptr` plus the members
+ * derived from this build's binary — see src/stats/deal_damage_layout.h and
+ * ghidra/offsets/DEALDAMAGE_PAYLOAD_LAYOUTS.md.
+ *
+ * A member whose offset OR whose enum label table could not be derived on this
+ * build is simply absent from the table rather than present with a guessed
+ * value: an absent field is recoverable, a wrong decode silently feeds mods a
+ * number that looks real. Originator is still `Ptr`-only for that reason.
+ *
+ * Every field is read-only. The payload is a plain table, so assigning to it
+ * (Windows allows `e.Functor.DamageType = x`) changes only the table — and for
+ * the functor specifically a write-through would be wrong anyway, since the
+ * functor is parsed once per stats entry and shared by every later execution.
  */
 void events_fire_deal_damage(lua_State *L, BG3SEEventType event,
                              const DealDamageEventData *data);
@@ -282,7 +293,8 @@ void events_fire_deal_damage(lua_State *L, BG3SEEventType event,
 /**
  * Fire BeforeDealDamage from esv::StatsSystem::ApplyDamage (Windows names the
  * same function ThrowDamageEvent). Windows' BeforeDealDamageEvent carries only
- * Hit and Attack, and so does this one.
+ * Hit and Attack, and so does this one; both are decoded the same way as on
+ * the DealDamage payload.
  */
 void events_fire_before_deal_damage(lua_State *L, void *statsSystem,
                                     const void *hit, const void *attack);

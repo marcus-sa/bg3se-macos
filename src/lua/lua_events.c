@@ -11,6 +11,7 @@
 
 #include "lua_events.h"
 #include "../stats/functor_hooks.h"
+#include "../stats/deal_damage_layout.h"
 #include "lua_gate.h"
 #include "lua_runtime.h"
 #include "../core/logging.h"
@@ -18,7 +19,13 @@
 #include "../mod/mod_loader.h"
 #include "../entity/component_registry.h"
 #include "../entity/component_lookup.h"
+#include "../entity/entity_system.h"
+#include "../entity/guid_lookup.h"
+#include "../enum/enum_registry.h"
 #include "../lifetime/lifetime.h"
+#include "../strings/fixed_string.h"
+
+#include <lauxlib.h>
 
 #include <stdatomic.h>
 #include <string.h>
@@ -1757,23 +1764,6 @@ static void set_opaque_object_field(lua_State *L, const char *field, const void 
     lua_setfield(L, -2, field);
 }
 
-/*
- * ecs::EntityRef is {EntityHandle Handle; EntityWorld* World;} — the +0/+8
- * layout is documented in functor_types.h and re-confirmed on 7398727 inside
- * the hooked function itself, which does `ldp x1, x0, [ref]` to feed
- * EntityWorld::GetComponent(world, handle). ls::ID<EntityHandleTraits> is the
- * bare 8-byte handle, so the same read with offset 0 covers both.
- */
-static void set_entity_handle_field(lua_State *L, const char *field, const void *ref) {
-    uint64_t handle = 0;
-    if (ref && safe_memory_read_u64((mach_vm_address_t)(uintptr_t)ref, &handle)) {
-        lua_pushinteger(L, (lua_Integer)handle);
-    } else {
-        lua_pushnil(L);
-    }
-    lua_setfield(L, -2, field);
-}
-
 static void set_position_field(lua_State *L, const char *field, const void *position) {
     float xyz[3];
     if (!position ||
@@ -1793,6 +1783,386 @@ static void set_position_field(lua_State *L, const char *field, const void *posi
     lua_setfield(L, -2, field);
 }
 
+/* ---------------------------------------------------------------------------
+ * Decoders for the DealDamage payload's object-valued members.
+ *
+ * Every offset used below comes from src/stats/deal_damage_layout.h, which
+ * derives them from the 4.1.1.7398727 arm64 slice; nothing here is taken from
+ * the Windows headers. Members whose offset or label table could not be
+ * derived on that binary are left absent rather than filled in from a
+ * plausible guess — a nil field is recoverable, a wrong decode silently feeds
+ * mods a number that looks real.
+ *
+ * Each engine object is snapshotted with ONE safe_memory_read and then decoded
+ * out of the local copy. Never touch game memory field by field here:
+ * safe_memory_read is a mach_vm_read_overwrite syscall, DealDamage fires once
+ * per damage instance per target, and this runs on the game thread inside a
+ * Dobby trampoline. Per-field reads would turn one AoE into a few hundred
+ * syscalls. Reading through the snapshot also means every field of an object
+ * comes from the same instant.
+ * ------------------------------------------------------------------------- */
+
+/* Unaligned-safe scalar loads out of a snapshot buffer. */
+static uint8_t buf_u8(const uint8_t *b, uint32_t off) { return b[off]; }
+
+static int32_t buf_i32(const uint8_t *b, uint32_t off) {
+    int32_t v; memcpy(&v, b + off, sizeof v); return v;
+}
+
+static uint32_t buf_u32(const uint8_t *b, uint32_t off) {
+    uint32_t v; memcpy(&v, b + off, sizeof v); return v;
+}
+
+static uint64_t buf_u64(const uint8_t *b, uint32_t off) {
+    uint64_t v; memcpy(&v, b + off, sizeof v); return v;
+}
+
+static float buf_f32(const uint8_t *b, uint32_t off) {
+    float v; memcpy(&v, b + off, sizeof v); return v;
+}
+
+/* Look up the label a value carries in one of this build's own enum tables.
+ * Returns NULL when the type is not registered or the value has no entry —
+ * callers then leave the field absent rather than pushing a raw number under
+ * a name the documented API says is a string. */
+static const char *event_enum_label(const char *type_name, uint64_t value) {
+    EnumTypeInfo *info = enum_registry_find_by_name(type_name);
+    if (!info) return NULL;
+    return enum_find_label(info->registry_index, value);
+}
+
+static void set_enum_byte_at(lua_State *L, const char *field,
+                             const uint8_t *b, uint32_t off,
+                             const char *enum_type) {
+    const char *label = event_enum_label(enum_type, buf_u8(b, off));
+    if (!label) return;
+    lua_pushstring(L, label);
+    lua_setfield(L, -2, field);
+}
+
+static void set_i32_at(lua_State *L, const char *field,
+                       const uint8_t *b, uint32_t off) {
+    lua_pushinteger(L, (lua_Integer)buf_i32(b, off));
+    lua_setfield(L, -2, field);
+}
+
+static void set_float_at(lua_State *L, const char *field,
+                         const uint8_t *b, uint32_t off) {
+    lua_pushnumber(L, (lua_Number)buf_f32(b, off));
+    lua_setfield(L, -2, field);
+}
+
+/* FixedString members are a 4-byte global-string-table index. 0xFFFFFFFF is
+ * the null index; fixed_string_resolve also returns NULL before the GST is
+ * available, in which case the field stays absent rather than becoming "". */
+static void set_fixedstring_at(lua_State *L, const char *field,
+                               const uint8_t *b, uint32_t off) {
+    uint32_t idx = buf_u32(b, off);
+    if (!fixed_string_is_valid(idx)) return;
+    const char *s = fixed_string_resolve(idx);
+    if (!s) return;
+    lua_pushstring(L, s);
+    lua_setfield(L, -2, field);
+}
+
+/* ls::Guid is the same 16 raw bytes the entity system reads out of
+ * ls::uuid::Component, so guid_to_string produces the spelling Osiris and
+ * Ext.Entity.HandleToUuid use. */
+static void set_guid_at(lua_State *L, const char *field,
+                        const uint8_t *b, uint32_t off) {
+    Guid g;
+    memcpy(&g, b + off, sizeof g);
+    char str[40];
+    guid_to_string(&g, str);
+    lua_pushstring(L, str);
+    lua_setfield(L, -2, field);
+}
+
+static void set_vec3_at(lua_State *L, const char *field,
+                        const uint8_t *b, uint32_t off) {
+    lua_newtable(L);
+    static const char *const kAxis[3] = {"x", "y", "z"};
+    for (int i = 0; i < 3; i++) {
+        float v = buf_f32(b, off + (uint32_t)(i * 4));
+        lua_pushnumber(L, (lua_Number)v);
+        lua_setfield(L, -2, kAxis[i]);
+        lua_pushnumber(L, (lua_Number)v);
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, field);
+}
+
+/*
+ * Push the same entity object Ext.Entity.Get returns, so `caster.Uuid.EntityUuid`
+ * resolves through the ordinary component path instead of a second, divergent
+ * entity shape invented here. EntityUserdata + the "BG3Entity" metatable is the
+ * whole contract (src/entity/entity_system.h); the lifetime handle must be the
+ * scope that is current now, which event_scope_begin() opened for this handler.
+ *
+ * Returns false (pushing nothing) rather than wrapping a handle that will not
+ * resolve — see the guard below.
+ */
+static bool push_entity_object(lua_State *L, uint64_t handle) {
+    if (!handle || !entity_handle_is_valid((EntityHandle)handle)) return false;
+    /*
+     * entity_handle_is_valid() only rejects all-ones. The engine's own "unset"
+     * handle on 7398727 is 0xFFC0000000000000 and it guards every use of a
+     * handle with two tests, both visible in the hooked function itself
+     * (StatsFunctorDealDamage::Execute @0x1057736d4):
+     *     lsr x9, x8, #54 ; cmp w9, #0x40 ; b.hi   <- type index out of range
+     *     cmp x8, #-0x40000000000000 ; b.eq        <- the unset sentinel
+     * (0xFFC0000000000000 >> 54 is 0x3ff, so the range test covers both.)
+     * Wrapping an unset handle would not fail here, it would fail two field
+     * reads later as `attempt to index a nil value (field 'Uuid')` inside the
+     * mod. A nil Caster is what the documented `if caster ~= nil` guard is for.
+     */
+    if ((handle >> 54) > 0x40) return false;
+    if (!entity_system_ready()) return false;
+
+    EntityUserdata *ud = (EntityUserdata *)lua_newuserdata(L, sizeof(EntityUserdata));
+    ud->handle = (EntityHandle)handle;
+    ud->lifetime = lifetime_lua_get_current(L);
+    luaL_getmetatable(L, "BG3Entity");
+    if (!lua_istable(L, -1)) {
+        /* No metatable registered in this VM: a bare userdata raises on its
+         * first index, which is strictly worse for a mod than nil. */
+        lua_pop(L, 2);
+        return false;
+    }
+    lua_setmetatable(L, -2);
+    return true;
+}
+
+/* Sets `field` to the entity object and `handle_field` to the raw 64-bit
+ * handle, so the plain integer this payload used to carry under `field` stays
+ * reachable. */
+static void set_entity_object_from_handle(lua_State *L, const char *field,
+                                          const char *handle_field,
+                                          uint64_t handle) {
+    lua_pushinteger(L, (lua_Integer)handle);
+    lua_setfield(L, -2, handle_field);
+    if (!push_entity_object(L, handle)) lua_pushnil(L);
+    lua_setfield(L, -2, field);
+}
+
+/*
+ * `ref` is either an ecs::EntityRef ({EntityHandle Handle; EntityWorld* World;})
+ * or a bare ls::ID<EntityHandleTraits>; the handle is at offset 0 in both. The
+ * +0/+8 EntityRef layout is documented in functor_types.h and re-confirmed on
+ * 7398727 inside the hooked function itself, which does `ldp x1, x0, [ref]` to
+ * feed EntityWorld::GetComponent(world, handle).
+ */
+static void set_entity_object_field(lua_State *L, const char *field,
+                                    const char *handle_field, const void *ref) {
+    uint64_t handle = 0;
+    if (!ref || !safe_memory_read_u64((mach_vm_address_t)(uintptr_t)ref, &handle)) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, field);
+        return;
+    }
+    set_entity_object_from_handle(L, field, handle_field, handle);
+}
+
+/*
+ * A DynamicArray<TDamagePair> whose element pointer and count have already been
+ * decoded out of the owning object's snapshot. The count comes from live
+ * memory, so it is clamped: a torn or stale read must cost a bounded number of
+ * reads, not a stall on the game thread inside a Lua callback.
+ */
+static void set_damage_list_field(lua_State *L, const char *field,
+                                  const void *elements, int32_t count) {
+    if (count < 0) count = 0;
+    if (count > DAMAGE_LIST_MAX_ELEMENTS) count = DAMAGE_LIST_MAX_ELEMENTS;
+
+    uint8_t pairs[DAMAGE_LIST_MAX_ELEMENTS * DAMAGE_PAIR_SIZE];
+    if (!elements || count == 0 ||
+        !safe_memory_read((mach_vm_address_t)(uintptr_t)elements, pairs,
+                          (size_t)count * DAMAGE_PAIR_SIZE)) {
+        count = 0;
+    }
+
+    lua_newtable(L);
+    for (int i = 0; i < count; i++) {
+        const uint8_t *e = pairs + (size_t)i * DAMAGE_PAIR_SIZE;
+        lua_newtable(L);
+        set_i32_at(L, "Amount", e, DAMAGE_PAIR_OFF_AMOUNT);
+        set_enum_byte_at(L, "DamageType", e, DAMAGE_PAIR_OFF_DAMAGE_TYPE,
+                         "DamageType");
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, field);
+}
+
+/*
+ * eoc::SpellPrototype head. Only the four members read off this build are
+ * exposed; SpellTypeId stays a raw number because no label table for it was
+ * derived here, and it is named ...Id rather than ...Type to say so.
+ */
+static void push_spell_prototype(lua_State *L, uintptr_t proto) {
+    uint8_t b[SPELL_PROTOTYPE_OFF_SPELL_FLAGS + 8];
+    if (!safe_memory_read((mach_vm_address_t)proto, b, sizeof b)) {
+        lua_pushnil(L);
+        return;
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)proto);
+    lua_setfield(L, -2, "Ptr");
+
+    set_i32_at(L, "StatsObjectIndex", b, SPELL_PROTOTYPE_OFF_STATS_OBJECT_INDEX);
+    set_i32_at(L, "SpellTypeId", b, SPELL_PROTOTYPE_OFF_SPELL_TYPE_ID);
+    /* The prototype's own stats name. Windows calls the member SpellId; it is
+     * also published as Name because it is the same string SpellId.Prototype
+     * carries. */
+    set_fixedstring_at(L, "SpellId", b, SPELL_PROTOTYPE_OFF_SPELL_ID);
+    set_fixedstring_at(L, "Name", b, SPELL_PROTOTYPE_OFF_SPELL_ID);
+
+    uint64_t flags = buf_u64(b, SPELL_PROTOTYPE_OFF_SPELL_FLAGS);
+    lua_pushinteger(L, (lua_Integer)flags);
+    lua_setfield(L, -2, "SpellFlagsValue");
+
+    /* An array of flag names, which is the shape mods iterate:
+     *   for _, flag in ipairs(proto.SpellFlags) do ... end
+     * One label per set bit from this build's own SpellFlags table
+     * (enum_find_label returns the game's spelling, not the Windows alias). A
+     * bit the table does not name contributes nothing rather than a
+     * fabricated label. */
+    EnumTypeInfo *info = enum_registry_find_by_name("SpellFlags");
+    lua_newtable(L);
+    if (info) {
+        int n = 0;
+        for (int bit = 0; bit < 64; bit++) {
+            uint64_t mask = 1ULL << bit;
+            if (!(flags & mask)) continue;
+            const char *label = enum_find_label(info->registry_index, mask);
+            if (!label) continue;
+            lua_pushstring(L, label);
+            lua_rawseti(L, -2, ++n);
+        }
+    }
+    lua_setfield(L, -2, "SpellFlags");
+}
+
+/*
+ * eoc::spell::SpellId, and its SpellInfo subclass (Windows
+ * SpellIdWithPrototype) when `with_prototype` is set. Member names are the
+ * game's own, taken from the file-static FixedStrings its savegame visitor
+ * keys each field with.
+ *
+ * SourceType is deliberately absent: the byte at +0x08 is verified, but this
+ * build ships no name table for eoc::spell::ESourceType that was derived here.
+ */
+static void set_spell_id_field(lua_State *L, const char *field,
+                               const void *ptr, bool with_prototype) {
+    uint8_t b[SPELL_INFO_SIZE];
+    size_t want = with_prototype ? (size_t)SPELL_INFO_SIZE : (size_t)SPELL_ID_SIZE;
+    if (!ptr || !safe_memory_read((mach_vm_address_t)(uintptr_t)ptr, b, want)) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, field);
+        return;
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)(uintptr_t)ptr);
+    lua_setfield(L, -2, "Ptr");
+
+    set_fixedstring_at(L, "OriginatorPrototype", b,
+                       SPELL_ID_OFF_ORIGINATOR_PROTOTYPE);
+    set_guid_at(L, "Source", b, SPELL_ID_OFF_SOURCE);
+    set_guid_at(L, "ProgressionSource", b, SPELL_ID_OFF_PROGRESSION_SOURCE);
+    set_fixedstring_at(L, "Prototype", b, SPELL_ID_OFF_PROTOTYPE);
+
+    if (with_prototype) {
+        uintptr_t proto = (uintptr_t)buf_u64(b, SPELL_INFO_OFF_SPELL_PROTO);
+        if (proto) {
+            push_spell_prototype(L, proto);
+        } else {
+            lua_pushnil(L);
+        }
+        lua_setfield(L, -2, "SpellProto");
+    }
+
+    lua_setfield(L, -2, field);
+}
+
+/*
+ * eoc::HitDesc. The members whose offsets came out of
+ * ecs::sync::Deserialize<eoc::HitDesc, ...> are exposed; DeathType, CauseType,
+ * HitWith, SpellAttackType and the two flag words are NOT, because this build
+ * ships no derived label table for those enums (only the upper-cased khonsu
+ * scripting spellings, which no mod compares against) and the documented API
+ * says they are strings. `Ptr` stays so existing introspection keeps working
+ * and a raw read from Lua is still possible.
+ */
+static void set_hit_desc_field(lua_State *L, const char *field, const void *ptr) {
+    uint8_t b[HIT_DESC_SIZE];
+    if (!ptr || !safe_memory_read((mach_vm_address_t)(uintptr_t)ptr, b, sizeof b)) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, field);
+        return;
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)(uintptr_t)ptr);
+    lua_setfield(L, -2, "Ptr");
+
+    set_i32_at(L, "TotalDamageDone", b, HIT_DESC_OFF_TOTAL_DAMAGE_DONE);
+    set_i32_at(L, "TotalHealDone", b, HIT_DESC_OFF_TOTAL_HEAL_DONE);
+    set_i32_at(L, "ArmorAbsorption", b, HIT_DESC_OFF_ARMOR_ABSORPTION);
+    set_i32_at(L, "LifeSteal", b, HIT_DESC_OFF_LIFE_STEAL);
+    set_i32_at(L, "SpellLevel", b, HIT_DESC_OFF_SPELL_LEVEL);
+    set_i32_at(L, "SpellPowerLevel", b, HIT_DESC_OFF_SPELL_POWER_LEVEL);
+    set_float_at(L, "ImpactForce", b, HIT_DESC_OFF_IMPACT_FORCE);
+
+    set_enum_byte_at(L, "DamageType", b, HIT_DESC_OFF_MAIN_DAMAGE_TYPE,
+                     "DamageType");
+    set_enum_byte_at(L, "AttackRollAbility", b, HIT_DESC_OFF_ATTACK_ABILITY,
+                     "AbilityId");
+    set_enum_byte_at(L, "SaveAbility", b, HIT_DESC_OFF_SAVE_ABILITY,
+                     "AbilityId");
+
+    set_fixedstring_at(L, "SpellId", b, HIT_DESC_OFF_SPELL_ID);
+
+    set_vec3_at(L, "ImpactPosition", b, HIT_DESC_OFF_IMPACT_POSITION);
+    set_vec3_at(L, "ImpactDirection", b, HIT_DESC_OFF_IMPACT_DIRECTION);
+
+    set_entity_object_from_handle(L, "Inflicter", "InflicterHandle",
+                                  buf_u64(b, HIT_DESC_OFF_INFLICTER));
+    set_entity_object_from_handle(L, "InflicterOwner", "InflicterOwnerHandle",
+                                  buf_u64(b, HIT_DESC_OFF_INFLICTER_OWNER));
+    set_entity_object_from_handle(L, "Throwing", "ThrowingHandle",
+                                  buf_u64(b, HIT_DESC_OFF_THROWN_OBJECT));
+
+    set_damage_list_field(L, "DamageList",
+                          (const void *)(uintptr_t)buf_u64(
+                              b, HIT_DESC_OFF_DAMAGE_LIST_ELEMENTS),
+                          buf_i32(b, HIT_DESC_OFF_DAMAGE_LIST_SIZE));
+
+    lua_setfield(L, -2, field);
+}
+
+/* eoc::AttackDesc — two totals and the accumulated per-type damage list. */
+static void set_attack_desc_field(lua_State *L, const char *field, const void *ptr) {
+    uint8_t b[ATTACK_DESC_SIZE];
+    if (!ptr || !safe_memory_read((mach_vm_address_t)(uintptr_t)ptr, b, sizeof b)) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, field);
+        return;
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)(uintptr_t)ptr);
+    lua_setfield(L, -2, "Ptr");
+
+    set_i32_at(L, "TotalDamageDone", b, ATTACK_DESC_OFF_TOTAL_DAMAGE_DONE);
+    set_i32_at(L, "TotalHealDone", b, ATTACK_DESC_OFF_TOTAL_HEAL_DONE);
+    set_damage_list_field(L, "DamageList",
+                          (const void *)(uintptr_t)buf_u64(
+                              b, ATTACK_DESC_OFF_DAMAGE_LIST_ELEMENTS),
+                          buf_i32(b, ATTACK_DESC_OFF_DAMAGE_LIST_SIZE));
+
+    lua_setfield(L, -2, field);
+}
 static void push_deal_damage_payload(lua_State *L, BG3SEEventType event,
                                      const DealDamageEventData *d) {
     lua_newtable(L);
@@ -1807,14 +2177,26 @@ static void push_deal_damage_payload(lua_State *L, BG3SEEventType event,
         lua_setfield(L, -2, "TypeId");
         lua_pushstring(L, "DealDamage");
         lua_setfield(L, -2, "Type");
+        /*
+         * Read-only. Windows lets a handler assign Functor.DamageType, but the
+         * functor here is the one parsed once out of the stats entry and shared
+         * by every future execution of that spell, so a write would not be
+         * scoped to this hit — it would repaint the stat permanently. Assigning
+         * to this key therefore only updates the Lua table.
+         */
+        uint8_t dt = 0;
+        if (safe_memory_read_u8((mach_vm_address_t)((uintptr_t)d->functor +
+                                    DEAL_DAMAGE_FUNCTOR_OFF_DAMAGE_TYPE), &dt)) {
+            set_enum_byte_at(L, "DamageType", &dt, 0, "DamageType");
+        }
     }
     lua_pop(L, 1);
 
-    set_entity_handle_field(L, "Caster", d->casterRef);
-    set_entity_handle_field(L, "Target", d->targetRef);
+    set_entity_object_field(L, "Caster", "CasterHandle", d->casterRef);
+    set_entity_object_field(L, "Target", "TargetHandle", d->targetRef);
     /* Windows' Caster2 — the separate source handle argument, not a second
      * read of Caster. */
-    set_entity_handle_field(L, "Caster2", d->sourceHandle2);
+    set_entity_object_field(L, "Caster2", "Caster2Handle", d->sourceHandle2);
     set_position_field(L, "Position", d->position);
 
     lua_pushboolean(L, d->isFromItem);
@@ -1826,16 +2208,28 @@ static void push_deal_damage_payload(lua_State *L, BG3SEEventType event,
     lua_pushinteger(L, (lua_Integer)d->conditionRollIndex);
     lua_setfield(L, -2, "ConditionRollIndex");
 
-    set_opaque_object_field(L, "SpellId", d->spellId);
-    set_opaque_object_field(L, "SpellId2", d->spellId2);
+    /* p6 is eoc::spell::SpellInfo (Windows SpellIdWithPrototype), p17 is a
+     * plain eoc::spell::SpellId — only the former carries SpellProto. */
+    set_spell_id_field(L, "SpellId", d->spellId, true);
+    set_spell_id_field(L, "SpellId2", d->spellId2, false);
     set_opaque_object_field(L, "Originator", d->originator);
-    set_opaque_object_field(L, "Hit", d->hit);
-    set_opaque_object_field(L, "Attack", d->attack);
+    set_hit_desc_field(L, "Hit", d->hit);
+    set_attack_desc_field(L, "Attack", d->attack);
 
     /* Windows carries Result on DealtDamage only; before the original runs the
      * output object is uninitialized, so exposing it would be a lie. */
     if (event == EVENT_DEALT_DAMAGE) {
+        /* HitResult is HitDesc at +0 followed by AttackDesc at +0x1a8
+         * (ghidra/offsets/DEALDAMAGE_HOOKS.md), so the same two decoders apply
+         * to the halves of the output object. */
         set_opaque_object_field(L, "Result", d->result);
+        lua_getfield(L, -1, "Result");
+        if (lua_istable(L, -1) && d->result) {
+            set_hit_desc_field(L, "Hit", d->result);
+            set_attack_desc_field(L, "Attack",
+                                  (const void *)((uintptr_t)d->result + HIT_DESC_SIZE));
+        }
+        lua_pop(L, 1);
     } else {
         set_nil_field(L, "Result");
     }
@@ -1928,8 +2322,8 @@ void events_fire_before_deal_damage(lua_State *L, void *statsSystem,
         }
 
         lua_newtable(L);
-        set_opaque_object_field(L, "Hit", hit);
-        set_opaque_object_field(L, "Attack", attack);
+        set_hit_desc_field(L, "Hit", hit);
+        set_attack_desc_field(L, "Attack", attack);
         /* Not part of the Windows payload; exposed as a plain address for
          * diagnostics, matching the *Ptr convention used elsewhere here. */
         set_pointer_field(L, "StatsSystemPtr", statsSystem);

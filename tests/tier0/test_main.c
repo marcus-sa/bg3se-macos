@@ -22,6 +22,7 @@ void register_guid_lookup_tests(void);
 void register_user_variables_tests(void);
 void register_vars_persist_tests(void);
 void register_deal_damage_abi_tests(void);
+void register_deal_damage_payload_tests(void);
 void register_spell_meta_layout_tests(void);
 void register_component_alias_tests(void);
 void register_component_offsets_spell_tests(void);
@@ -42,6 +43,7 @@ int main(void) {
     register_user_variables_tests();
     register_vars_persist_tests();
     register_deal_damage_abi_tests();
+    register_deal_damage_payload_tests();
     register_spell_meta_layout_tests();
     register_component_alias_tests();
     register_component_offsets_spell_tests();

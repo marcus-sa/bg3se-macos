@@ -273,6 +273,18 @@ Confirmed by the prologue:
 `x0..x3` pointers, `w4` `EAbility`, `w5` `bool`. There is no hidden result
 object: the function returns `void` and `x0` is `this`.
 
+## Member layouts of the payload objects
+
+This document establishes where the hook arguments come from; it says nothing
+about what is inside them. That is
+[`DEALDAMAGE_PAYLOAD_LAYOUTS.md`](DEALDAMAGE_PAYLOAD_LAYOUTS.md), which derives
+`eoc::StatsFunctorDealDamage::DamageType`, the `eoc::spell::SpellId` /
+`SpellInfo` members, the `eoc::SpellPrototype` head, `eoc::HitDesc`,
+`eoc::AttackDesc` and `TDamagePair` from this same binary, plus the
+`EDamageType` and `eoc::ESpellFlags` label tables the decoder turns those bytes
+into. It also independently re-derives the `HitDesc` size of `0x1a8` and the
+`AttackDesc` size of `0x20` quoted in the `HitResult` section above.
+
 ## Version gating
 
 Both offsets exist only in the `4.1.1.7398727` row of

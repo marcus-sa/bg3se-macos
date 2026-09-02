@@ -396,6 +396,7 @@ if(BUILD_TESTS)
         tests/tier0/test_user_variables.c
         tests/tier0/test_vars_persist.c
         tests/tier0/test_deal_damage_abi.c
+        tests/tier0/test_deal_damage_payload.c
         tests/tier0/test_spell_meta_layout.c
         tests/tier0/test_component_aliases.c
         tests/tier0/test_component_offsets_spells.c
