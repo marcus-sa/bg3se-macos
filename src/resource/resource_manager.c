@@ -547,6 +547,43 @@ void resource_dump_type(ResourceBankType type, int max_count) {
 #include <stdlib.h>
 #include <stdio.h>
 #include "../template/template_manager.h"
+#include "../stats/stats_manager.h"
+
+/* Report what the stats system actually parsed for a named entry. A mod entry
+ * that declares `using "<parent>"` and then overrides a field should show the
+ * override; if it shows the parent's value instead, the child's line did not
+ * take effect -- which is invisible in game except as wrong numbers. */
+static void stats_probe_once(const char *list) {
+    static const char *kProps[] = {
+        "Damage", "DefaultBoosts", "Boosts", "PassivesOnEquip", "Rarity"
+    };
+    char buf[1024];
+    size_t n = strlen(list);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, list, n);
+    buf[n] = '\0';
+
+    if (!stats_manager_ready()) {
+        log_message("[Stats] probe: stats manager not ready");
+        return;
+    }
+    for (char *tok = strtok(buf, ", "); tok; tok = strtok(NULL, ", ")) {
+        StatsObjectPtr o = stats_get(tok);
+        if (!o) {
+            log_message("[Stats] probe %s -> NOT FOUND", tok);
+            continue;
+        }
+        const char *using_ = stats_get_using(o);
+        log_message("[Stats] probe %s (type=%s, using=%s)", tok,
+                    stats_get_type(o) ? stats_get_type(o) : "?",
+                    using_ ? using_ : "-");
+        for (size_t i = 0; i < sizeof(kProps)/sizeof(kProps[0]); i++) {
+            if (!stats_has_property(o, kProps[i])) continue;
+            const char *v = stats_get_string(o, kProps[i]);
+            log_message("[Stats]     %-16s = %s", kProps[i], v ? v : "(null)");
+        }
+    }
+}
 
 void resource_probe_tick(void) {
     static int s_state = 0;        /* 0 = unstarted, 1 = probing, 2 = done */
@@ -647,5 +684,8 @@ void resource_probe_tick(void) {
         log_message("[Resource] probe %s -> banks: %s | template: %s", tok,
                     hits[0] ? hits : "none", tmpl);
     }
+    const char *sp = getenv("BG3SE_STATS_PROBE");
+    if (sp && *sp) stats_probe_once(sp);
+
     s_state = 2;
 }
