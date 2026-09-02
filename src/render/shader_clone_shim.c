@@ -83,6 +83,41 @@ typedef enum {
  * trading it for hangs buys nothing. */
 static AliasMode s_mode = ALIAS_FULL;
 
+/* Resolved-alias cache, keyed by the requested FixedString index.
+ *
+ * Two jobs. First, correctness of measurement: the alias search re-ran on
+ * every lookup, re-interning the same path up to 98 times in one session and
+ * flooding the log, which made it impossible to see how many DISTINCT
+ * materials collapse onto a single base ShaderID. That collapse is the open
+ * question about the screen corruption -- if the engine keys any pipeline or
+ * material state off the returned ShaderID, many-to-one aliasing would reuse
+ * state built for a different material, which looks exactly like the geometry
+ * garbage on screen. Logging each source once, with the id it resolved to,
+ * makes the ratio directly countable from a session log.
+ *
+ * Second, cost: a miss is the slow path (up to three interns plus three
+ * GetShader calls), and it repeats for every draw using that material. */
+#define ALIAS_CACHE_SIZE 2048          /* power of two; ~132 live entries */
+static uint32_t s_cache_key[ALIAS_CACHE_SIZE];   /* FixedString index, 0 = empty */
+static uint64_t s_cache_val[ALIAS_CACHE_SIZE];
+static uint32_t s_cache_used = 0;
+
+static uint64_t *cache_slot(uint32_t fs) {
+    uint32_t h = fs * 2654435761u;                /* Knuth multiplicative */
+    for (uint32_t i = 0; i < ALIAS_CACHE_SIZE; i++) {
+        uint32_t k = (h + i) & (ALIAS_CACHE_SIZE - 1);
+        if (s_cache_key[k] == fs) return &s_cache_val[k];
+        if (s_cache_key[k] == 0) {
+            if (s_cache_used * 4 >= ALIAS_CACHE_SIZE * 3) return NULL; /* keep it sparse */
+            s_cache_key[k] = fs;
+            s_cache_val[k] = 0;                   /* 0 = not resolved yet */
+            s_cache_used++;
+            return &s_cache_val[k];
+        }
+    }
+    return NULL;
+}
+
 /* Render variants never substituted. Comma-separated, BG3SE_SHADER_ALIAS_SKIP. */
 #define MAX_SKIP_VARIANTS 8
 static char s_skip[MAX_SKIP_VARIANTS][16];
@@ -171,7 +206,8 @@ static uint64_t resolve_alias(void *mgr, const char *name) {
 
         uint64_t base_id = s_orig(mgr, &base_fs);
         if (base_id != SHADERID_INVALID) {
-            LOG_CORE_INFO("ShaderCloneShim: '%s' -> '%s'", name, cands[i]);
+            LOG_CORE_INFO("ShaderCloneShim: '%s' -> '%s' (id=0x%llx)",
+                          name, cands[i], (unsigned long long)base_id);
             return base_id;
         }
     }
@@ -194,6 +230,13 @@ static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
     // a Steam library path plus Public/<mod-uuid>/Assets/Materials/... reaches
     // ~310 chars before the material name even starts, so every buffer in
     // resolve_alias is PATH_MAX and the helpers fail closed above it.
+    /* Answer repeats from cache: same request, same substitution, and the log
+     * then carries exactly one line per distinct source material. */
+    uint64_t *slot = cache_slot(*name_fs);
+    if (slot && *slot != 0) {
+        return *slot == SHADERID_INVALID ? id : *slot;
+    }
+
     const char *name = fixed_string_resolve(*name_fs);
     if (!name) {
         LOG_CORE_INFO("ShaderCloneShim: MISS for unresolvable FixedString 0x%x",
@@ -201,7 +244,9 @@ static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
         return id;
     }
 
-    return resolve_alias(mgr, name);
+    uint64_t resolved = resolve_alias(mgr, name);
+    if (slot) *slot = resolved;
+    return resolved == SHADERID_INVALID ? id : resolved;
 }
 
 bool shader_clone_shim_init(void *binary_base) {
