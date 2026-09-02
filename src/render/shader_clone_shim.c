@@ -50,23 +50,15 @@ typedef uint64_t (*GetShaderFn)(void *mgr, const uint32_t *name_fs);
 static GetShaderFn s_orig = NULL;
 static bool s_installed = false;
 
-static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
-    uint64_t id = s_orig(mgr, name_fs);
-    if (id != SHADERID_INVALID || !name_fs) {
-        return id;
-    }
-
-    const char *name = fixed_string_resolve(*name_fs);
-    if (!name) {
-        LOG_CORE_INFO("ShaderCloneShim: MISS for unresolvable FixedString 0x%x",
-                      *name_fs);
-        return id;
-    }
-
-    // Shader names arrive as full filesystem paths, not bare material names:
-    // a Steam library path plus Public/<mod-uuid>/Assets/Materials/... reaches
-    // ~310 chars before the material name even starts, so every buffer here is
-    // PATH_MAX and the helpers fail closed above it.
+/* Cold path only. Kept out of fake_GetShader so the hot path -- every shader
+ * lookup the engine makes, on its render and worker threads -- does not
+ * reserve the candidate buffers. Inlined, the 3 x PATH_MAX of scratch here
+ * grew fake_GetShader's frame from ~1KB to 3104 bytes (`sub sp, sp, #0xc20`),
+ * charged unconditionally at entry, long before the miss check. Thread stacks
+ * we do not own are not the place to spend 3KB per call for a path that runs
+ * on well under 1% of them. */
+__attribute__((noinline))
+static uint64_t resolve_alias(void *mgr, const char *name) {
     char cands[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
     int n = shader_alias_candidates(name, cands);
 
@@ -82,11 +74,31 @@ static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
     }
 
     // Genuine miss: no base shader exists under any alias. These are the names
-    // whose invalid IDs end up in pipeline descriptors — log them, because a
+    // whose invalid IDs end up in pipeline descriptors -- log them, because a
     // null pipeline is a renderer crash, not a dropped draw.
     LOG_CORE_INFO("ShaderCloneShim: MISS '%s' (%d alias candidate(s) tried)",
                   name, n);
-    return id;
+    return SHADERID_INVALID;
+}
+
+static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
+    uint64_t id = s_orig(mgr, name_fs);
+    if (id != SHADERID_INVALID || !name_fs) {
+        return id;
+    }
+
+    // Shader names arrive as full filesystem paths, not bare material names:
+    // a Steam library path plus Public/<mod-uuid>/Assets/Materials/... reaches
+    // ~310 chars before the material name even starts, so every buffer in
+    // resolve_alias is PATH_MAX and the helpers fail closed above it.
+    const char *name = fixed_string_resolve(*name_fs);
+    if (!name) {
+        LOG_CORE_INFO("ShaderCloneShim: MISS for unresolvable FixedString 0x%x",
+                      *name_fs);
+        return id;
+    }
+
+    return resolve_alias(mgr, name);
 }
 
 bool shader_clone_shim_init(void *binary_base) {
