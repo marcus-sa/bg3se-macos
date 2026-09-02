@@ -96,6 +96,25 @@ def test_typeid_generation_is_deterministic_for_symbol_records() -> None:
     assert "component_data_shift" not in header + registry
 
 
+def _component_named_surface(records):
+    """The pre-widening surface: only classes whose name contains "Component".
+
+    component_surface() now keeps every ecs::ComponentTypeIdContext symbol,
+    because the naming convention was never what made a class a component --
+    esv::Character and the eoc::rest::LongRest* family are ordinary components
+    that the substring filter silently dropped. The frozen-binary counts below
+    were measured against the old filter and are kept under it so they stay
+    checkable without re-deriving them from a binary that is not in the tree.
+    """
+
+    return sorted(
+        record
+        for record in records
+        if record.context == COMPONENT_CONTEXT
+        and "Component" in record.component_name
+    )
+
+
 def test_typeid_frozen_binary_migration_and_committed_outputs() -> None:
     _require_frozen_binaries()
 
@@ -110,18 +129,38 @@ def test_typeid_frozen_binary_migration_and_committed_outputs() -> None:
         extract_replication_contexts(NEW_BINARY, NEW_BUILD)
     )
 
-    assert len(component_surface(old_records)) == 1999
-    assert len(surface) == 2004
+    assert len(_component_named_surface(old_records)) == 1999
+    assert len(_component_named_surface(new_records)) == 2004
     assert len(report.shared) == 1998
     assert set(report.added) == EXPECTED_ADDED
     assert set(report.removed) == EXPECTED_REMOVED
     assert dict(report.delta_families) == EXPECTED_DELTA_FAMILIES
 
+    # Widening adds 88 classes whose names do not end in "Component" and drops
+    # none: esv::Character, esv::Item, ecl::Scenery, the eoc::rest::LongRest*
+    # family, the *CameraBehavior types and the trigger classes.
+    assert len(surface) == 2092
+    assert {record.component_name for record in _component_named_surface(new_records)} <= {
+        record.component_name for record in surface
+    }
+    assert "esv::Character" in {record.component_name for record in surface}
+    assert "esv::Item" in {record.component_name for record in surface}
+
     assert all(record.raw_mangled_symbol for record in surface)
     assert all(record.context == COMPONENT_CONTEXT for record in surface)
     assert all(record.build_id == NEW_BUILD for record in surface)
-    assert len({record.component_name for record in surface}) == 2004
-    assert len({record.raw_mangled_symbol for record in surface}) == 2004
+    assert len({record.component_name for record in surface}) == 2092
+    assert len({record.raw_mangled_symbol for record in surface}) == 2092
+
+    # Every row must carry a guard address: without it an unresolved
+    # m_TypeIndex reads 0 and is indistinguishable from the one component that
+    # really owns index 0. The guard is not always at m_TypeIndex + 8 -- seven
+    # of these have a 4-byte-aligned index with the guard packed at +4.
+    assert all(record.guard_va for record in surface)
+    assert all(record.guard_va for record in (*curated_only, *one_frame))
+    assert sum(
+        1 for record in surface if record.guard_va - record.preferred_va != 8
+    ) == 7
 
     assert {record.component_name for record in curated_only} == {
         "ecl::Character",

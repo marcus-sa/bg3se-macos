@@ -27,6 +27,7 @@ Reverse-engineered offset documentation from Ghidra analysis of the BG3 macOS bi
 | [COMPONENT_SIZES.md](COMPONENT_SIZES.md) | Size extraction results |
 | [SIGNAL_INTEGRATION.md](SIGNAL_INTEGRATION.md) | Entity event signal hooks |
 | [COMPONENT_NAME_ALIASES.md](COMPONENT_NAME_ALIASES.md) | BG3SE short component name -> engine class name table; why prefix probing cannot reach inner-namespace/OneFrame components (7398727) |
+| [SERVER_CHARACTER_ITEM_LAYOUT.md](SERVER_CHARACTER_ITEM_LAYOUT.md) | esv::Character (0x1a8) / esv::Item (0xb0) member offsets incl. Template at 0xC8 / 0x48; why both are proxy components whose ECS slot holds a pointer (7398727) |
 | [ADDED_SPELLS_COMPONENT.md](ADDED_SPELLS_COMPONENT.md) | eoc::spell::AddedSpellsComponent is DynamicArray<SpellMeta> at +0x00, sizeof 0x10, confirmed from the ECS destructor thunk (7398727) |
 | `components/` | Per-namespace component docs |
 

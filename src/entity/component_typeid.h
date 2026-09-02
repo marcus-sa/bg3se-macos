@@ -43,7 +43,7 @@ bool component_typeid_ready(void);
 int component_typeid_discover(void);
 
 /**
- * Discover TypeIds for all generated components (2004 components).
+ * Discover TypeIds for the whole generated component surface.
  * Called after component_typeid_discover() to fill in the rest.
  * @return Number of additional components discovered
  */
@@ -58,12 +58,41 @@ int component_typeid_discover_all_generated(void);
 bool component_typeid_read(uint64_t preferred_va, uint16_t *outIndex);
 
 /**
+ * Read a TypeId global only once the game has actually resolved it.
+ *
+ * Every m_TypeIndex is an Itanium-ABI function-local static that ships as 0
+ * with a zero guard variable, so an ungated read of an unresolved type yields
+ * 0 -- and 0 is a real index belonging to whichever component registered
+ * first. Registering on that read binds the name to a foreign storage slot and
+ * hands mods another component's memory; the same defect on the static-data
+ * side is written up in ghidra/offsets/STATICDATA_HEADMASTER_LOOKUP.md.
+ *
+ * @param preferred_va Build-specific preferred VA of the m_TypeIndex global
+ * @param guard_va     Preferred VA of that static's __ZGV guard variable.
+ *                     Pass 0 only when no guard symbol is known; the read is
+ *                     then ungated and index 0 stays ambiguous.
+ * @param outIndex     Output: the type index value
+ * @return true if the guard has run and the index is valid
+ */
+bool component_typeid_read_guarded(uint64_t preferred_va, uint64_t guard_va,
+                                   uint16_t *outIndex);
+
+/**
  * Look up a generated preferred VA by exact component name and TypeId context.
  * The generated implementation also retains the raw mangled symbol and build
  * identity for offline audit.
  */
 bool component_typeid_generated_lookup(const char *name, const char *context,
                                        uint64_t *out_va);
+
+/**
+ * Look up the guard-variable VA that pairs with the m_TypeIndex found by
+ * component_typeid_generated_lookup(). Kept separate from the entry rows so
+ * that widening the extracted surface stays a purely additive diff on them.
+ */
+bool component_typeid_generated_guard_lookup(const char *name,
+                                             const char *context,
+                                             uint64_t *out_guard_va);
 
 /** Return true when a component's layout metadata is curated in this module. */
 bool component_typeid_is_curated(const char *name);

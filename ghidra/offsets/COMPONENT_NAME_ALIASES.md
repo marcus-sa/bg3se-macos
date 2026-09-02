@@ -6,7 +6,7 @@
 
 **Derived:** 2026-09-02
 
-**Artifact:** `src/entity/generated_component_aliases.h` (629 rows)
+**Artifact:** `src/entity/generated_component_aliases.h` (643 rows)
 
 ## Why this table exists
 
@@ -40,7 +40,8 @@ mod, and the only symptom was a single `PAK load error`.
 | engine class | the name column of `src/entity/generated_component_registry.c` | That file is extracted from this build's `ls::TypeId<T, ecs::ComponentTypeIdContext>::m_TypeIndex` symbols, i.e. from the shipped arm64 slice. |
 
 Only pairs whose engine class exists on **this** build are emitted. 643 pairs
-were read from Windows, 14 dropped (below), 629 kept.
+were read from Windows, 643 kept — nothing is dropped on this build any more.
+The 14 that used to be dropped are covered below.
 
 ## Why the mapping cannot fabricate a component
 
@@ -83,9 +84,9 @@ becomes `"AddedSpellsComponent"` — while a mod writes `entity.AddedSpells`.
 The fallback runs only after the direct match fails, so no existing name
 changes meaning.
 
-## The 14 Windows pairs that are not in the table
+## The 14 pairs that used to be missing — now all present
 
-These are dropped because their engine class is absent from
+These were absent because their engine class was absent from
 `generated_component_registry.c`:
 
 ```
@@ -105,46 +106,96 @@ ServerProjectile       -> esv::Projectile
 TLPreviewDummy         -> ecl::TLPreviewDummy
 ```
 
-Most of them **do** exist on this build — the TypeId globals are exported:
+They were missing from the registry because `component_surface()` in
+`tools/extract_typeids.py` kept only classes whose name contained `Component`.
+That is a naming convention, not a property of the ECS: every one of these
+carries a real `ls::TypeId<T, ecs::ComponentTypeIdContext>::m_TypeIndex`. The
+filter is gone, so the surface went from 2004 to 2092 rows and all 14 resolve.
+
+All 14 confirmed on this build (addresses are the ones now in
+`generated_component_registry.c`):
+
+| short name | engine class | m_TypeIndex | guard |
+|---|---|---|---|
+| `DefaultCameraBehavior` | `ls::DefaultCameraBehavior` | `0x10896e468` | `0x10896e470` |
+| `EffectCameraBehavior` | `ls::EffectCameraBehavior` | `0x10896e488` | `0x10896e490` |
+| `GameCameraBehavior` | `ecl::GameCameraBehavior` | `0x1088e1658` | `0x1088e1660` |
+| `GlobalCombatRequests` | `esv::combat::GlobalCombatRequests` | `0x1089295d0` | `0x1089295d8` |
+| `LongRestState` | `eoc::rest::LongRestState` | `0x10891b490` | `0x10891b498` |
+| `LongRestTimeline` | `eoc::rest::LongRestTimeline` | `0x108943f58` | `0x108943f60` |
+| `LongRestTimers` | `eoc::rest::LongRestTimers` | `0x10891ac80` | `0x10891ac88` |
+| `LongRestUsers` | `eoc::rest::LongRestUsers` | `0x108943f68` | `0x108943f70` |
+| `RestingEntities` | `eoc::rest::RestingEntities` | `0x10893fb48` | `0x10893fb50` |
+| `Scenery` | `ecl::Scenery` | `0x1088df3a8` | `0x1088df3b0` |
+| `ServerCharacter` | `esv::Character` | `0x10894d9c8` | `0x10894d9d0` |
+| `ServerItem` | `esv::Item` | `0x10894a510` | `0x10894a518` |
+| `ServerProjectile` | `esv::Projectile` | `0x10893fce8` | `0x10893fcf0` |
+| `TLPreviewDummy` | `ecl::TLPreviewDummy` | `0x1088e1bf0` | `0x1088e1bf8` |
 
 ```bash
-nm -arch arm64 /tmp/bg3_arm64 | \
-  grep -E '__ZN2ls6TypeIdIN3esv9CharacterEN3ecs22ComponentTypeIdContextEE11m_TypeIndexE$'
-# 0000000108... D  __ZN2ls6TypeIdIN3esv9CharacterEN3ecs22ComponentTypeIdContextEE11m_TypeIndexE
+# reproduce any row
+lipo -thin arm64 "$BG3" -output /tmp/bg3_arm64
+nm -arch arm64 -gU /tmp/bg3_arm64 | c++filt | \
+  grep -E 'ls::TypeId<esv::Character, ecs::ComponentTypeIdContext>::m_TypeIndex'
 ```
 
-They are missing because the TypeId extractor that produced
-`generated_component_registry.c` only keeps classes whose name ends in
-`Component`; `esv::Character`, `ecl::Scenery`, `eoc::rest::LongRestState` and
-friends do not. (`ls::DefaultCameraBehavior` and `ls::EffectCameraBehavior` have
-no `ComponentTypeIdContext` symbol at all and may be Windows-only or
-differently spelled here.)
+The earlier note that `ls::DefaultCameraBehavior` and `ls::EffectCameraBehavior`
+"have no `ComponentTypeIdContext` symbol at all" was wrong — they were simply
+being filtered out with the other 86.
 
-Fixing that means widening the extractor in `tools/`, which is out of scope for
-this change; the aliases for those names are deliberately absent rather than
-present-but-dead, so nothing claims to work that does not.
+`ServerCharacter` and `ServerItem` additionally have derived property layouts;
+see [SERVER_CHARACTER_ITEM_LAYOUT.md](SERVER_CHARACTER_ITEM_LAYOUT.md). The
+other 12 resolve as component types (so `Ext.Entity.OnCreate` accepts them) but
+carry no field offsets.
+
+## Left unfixed
+
+Nothing from the Windows `DEFINE_COMPONENT` set. Two things that widening did
+*not* fix, recorded so they are not mistaken for regressions:
+
+* **`.Template.Icon` still fails.** `ServerCharacter.Template` resolves to the
+  `eoc::CharacterTemplate*` as an address; there is no template proxy to index
+  into. See the last section of SERVER_CHARACTER_ITEM_LAYOUT.md.
+* **Fields that could not be derived** are listed per component in that same
+  document — `esv::Character.Inventory` most notably. They are omitted rather
+  than guessed.
+
+## Two side effects of widening the surface
+
+Widening added 88 registry rows, and `resolve_component_type()` probes the
+registry after consulting this table. Two consequences:
+
+1. **70 short names became probe-reachable that previously raised.** They are
+   the trigger and camera-behaviour classes (`RegionTrigger`, `PortalTrigger`,
+   `ArcBallCameraBehavior`, `ls::Scene`, …). Previously `Ext.Entity.OnCreate`
+   raised "Unknown component type" on all of them; now they resolve. Purely
+   additive — none of them resolved to anything before.
+
+2. **Bare `Character` and `Item` changed meaning in the probe.** The probe order
+   is `eoc::`, `esv::`, `ecl::`, so `"Character"` used to fall through to
+   `ecl::Character` and now stops at `esv::Character` (same for `Item`). Neither
+   is a BG3SE name: Windows has `ClientCharacter` for `ecl::Character` and
+   `ServerCharacter` for `esv::Character`, both of which are in this table and
+   are consulted before the probe, so no mod written against Windows BG3SE is
+   affected. The bare spellings were a port-only accident in both directions.
 
 ## Regenerating
 
-```python
-# Run from the repo root with the Windows reference checked out.
-import re, os
-WIN  = '/path/to/bg3se-windows/BG3Extender/GameDefinitions'
-PORT = 'src/entity'
+```bash
+# 1. the engine-class column (also emits the guard table)
+BIN="$HOME/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/Baldur's Gate 3.app/Contents/MacOS/Baldur's Gate 3"
+python3 tools/extract_typeids.py "$BIN" --build-id 4.1.1.7398727 \
+    --header-out src/entity/generated_typeids.h \
+    --registry-out src/entity/generated_component_registry.c
 
-pairs = {}
-for root, _, files in os.walk(WIN):
-    for f in sorted(files):
-        txt = open(os.path.join(root, f), encoding='utf-8', errors='replace').read()
-        for m in re.finditer(r'DEFINE_COMPONENT\(\s*([A-Za-z0-9_]+)\s*,\s*"([^"]+)"', txt):
-            pairs[m.group(1)] = m.group(2)
-
-reg   = open(os.path.join(PORT, 'generated_component_registry.c'), encoding='utf-8').read()
-names = set(re.findall(r'^\s*\{\s*"([^"]+)"', reg, re.M))
-
-for short, engine in sorted((s, e) for s, e in pairs.items() if e in names):
-    print('    { "%s", "%s" },' % (short, engine))
+# 2. the short-name column, filtered against what step 1 produced
+python3 tools/generate_component_aliases.py \
+    --windows /path/to/bg3se-windows/BG3Extender/GameDefinitions
 ```
+
+`generate_component_aliases.py` prints `<n> Windows pairs, <n> kept, <n>
+dropped` on stderr and names every dropped pair, so a build where some engine
+class disappears is visible without diffing the header.
 
 Rows must stay sorted by short name — `component_alias_lookup()` binary-searches
 and `tests/tier0/test_component_aliases.c` asserts the ordering, because an

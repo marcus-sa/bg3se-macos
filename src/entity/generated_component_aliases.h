@@ -1,8 +1,8 @@
 /*
  * generated_component_aliases.h - BG3SE short component name -> engine class name
  *
- * Generated; do not edit by hand. Regenerate with the script transcribed in
- * ghidra/offsets/COMPONENT_NAME_ALIASES.md.
+ * Generated; do not edit by hand. Regenerate with
+ * tools/generate_component_aliases.py (see ghidra/offsets/COMPONENT_NAME_ALIASES.md).
  *
  * Build identity: 4.1.1.7398727
  *
@@ -212,6 +212,7 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "DeathState", "eoc::death::StateComponent" },
     { "DeathType", "eoc::death::DeathTypeComponent" },
     { "Decal", "ls::DecalComponent" },
+    { "DefaultCameraBehavior", "ls::DefaultCameraBehavior" },
     { "Detached", "eoc::DetachedComponent" },
     { "DialogState", "eoc::dialog::StateComponent" },
     { "DifficultyCheck", "eoc::DifficultyCheckComponent" },
@@ -237,6 +238,7 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "DummyVFXEntities", "ecl::dummy::VFXEntitiesComponent" },
     { "DynamicAnimationTags", "ls::animation::DynamicAnimationTagsComponent" },
     { "Effect", "ls::EffectComponent" },
+    { "EffectCameraBehavior", "ls::EffectCameraBehavior" },
     { "EncumbranceState", "eoc::encumbrance::StateComponent" },
     { "EncumbranceStats", "eoc::encumbrance::StatsComponent" },
     { "EocLevel", "eoc::LevelComponent" },
@@ -268,12 +270,14 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "Floating", "eoc::FloatingComponent" },
     { "FloorInfo", "eoc::floor::InfoComponent" },
     { "FogVolumeRequest", "eoc::FogVolumeRequestComponent" },
+    { "GameCameraBehavior", "ecl::GameCameraBehavior" },
     { "GameObjectVisual", "eoc::GameObjectVisualComponent" },
     { "GameplayEffectSetTimeFactorRequests", "ls::GameplayEffectSetTimeFactorRequestsSingletonComponent" },
     { "GameplayLight", "eoc::GameplayLightComponent" },
     { "GameplaySetTransform", "ls::transform::GameplaySetTransformRequestsComponent" },
     { "GameplayVFX", "ls::GameplayVFXSingletonComponent" },
     { "GameplayVFXSetPlayTimeRequests", "ls::GameplayVFXSetPlayTimeRequestsSingletonComponent" },
+    { "GlobalCombatRequests", "esv::combat::GlobalCombatRequests" },
     { "GlobalLongRestDisabled", "eoc::GlobalLongRestDisabledComponent" },
     { "GlobalShortRestDisabled", "eoc::GlobalShortRestDisabledComponent" },
     { "God", "eoc::god::GodComponent" },
@@ -355,6 +359,10 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "LevelUp", "eoc::progression::LevelUpComponent" },
     { "LocalBound", "ls::LocalBoundComponent" },
     { "Lock", "eoc::lock::LockComponent" },
+    { "LongRestState", "eoc::rest::LongRestState" },
+    { "LongRestTimeline", "eoc::rest::LongRestTimeline" },
+    { "LongRestTimers", "eoc::rest::LongRestTimers" },
+    { "LongRestUsers", "eoc::rest::LongRestUsers" },
     { "Loot", "eoc::LootComponent" },
     { "LootingState", "eoc::LootingStateComponent" },
     { "MapMarkerStyle", "eoc::item::MapMarkerStyleComponent" },
@@ -437,10 +445,12 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "Repose", "eoc::repose::StateComponent" },
     { "RequestedRoll", "eoc::RequestedRollComponent" },
     { "Resistances", "eoc::ResistancesComponent" },
+    { "RestingEntities", "eoc::rest::RestingEntities" },
     { "RollModifiers", "eoc::active_roll::ModifiersComponent" },
     { "Ruleset", "eoc::ruleset::RulesetComponent" },
     { "RulesetModifiers", "eoc::ruleset::RulesetModifiersComponent" },
     { "SceneAttach", "ls::SceneAttachComponent" },
+    { "Scenery", "ecl::Scenery" },
     { "ScriptedExplosion", "eoc::spell::ScriptedExplosionComponent" },
     { "ServerActivationGroupContainer", "esv::ActivationGroupContainerComponent" },
     { "ServerAggregatedGameplayLightData", "esv::sight::AggregatedGameplayLightDataComponent" },
@@ -464,6 +474,7 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "ServerCCEquipmentSetRequest", "esv::character_creation::EquipmentSetRequestComponent" },
     { "ServerCCGod", "esv::character_creation::GodComponent" },
     { "ServerCCUpdates", "esv::character_creation::UpdatesComponent" },
+    { "ServerCharacter", "esv::Character" },
     { "ServerCombatGroupMapping", "esv::combat::CombatGroupMappingComponent" },
     { "ServerDeathRequest", "esv::death::DeathRequestOneFrameComponent" },
     { "ServerDeathState", "esv::death::StateComponent" },
@@ -491,6 +502,7 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "ServerIsLatestOwner", "esv::ownership::IsLatestOwnerComponent" },
     { "ServerIsOriginalOwner", "esv::ownership::IsOriginalOwnerComponent" },
     { "ServerIsPreviousOwner", "esv::ownership::IsPreviousOwnerComponent" },
+    { "ServerItem", "esv::Item" },
     { "ServerKiller", "esv::death::KillerComponent" },
     { "ServerLeader", "esv::LeaderComponent" },
     { "ServerLightLosCheckQueue", "esv::sight::LightLosCheckQueueComponent" },
@@ -509,6 +521,7 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "ServerPingCooldownSingleton", "esv::PingCooldownSingletonComponent" },
     { "ServerPingRequestSingleton", "esv::PingRequestSingletonComponent" },
     { "ServerProficiencyGroupStats", "esv::stats::proficiency::ProficiencyGroupStatsComponent" },
+    { "ServerProjectile", "esv::Projectile" },
     { "ServerProjectileAttachment", "esv::projectile::AttachmentComponent" },
     { "ServerProjectileCache", "esv::spell_cast::ProjectileCacheComponent" },
     { "ServerProjectileInitialization", "esv::projectile::InitializationComponent" },
@@ -629,6 +642,7 @@ static const ComponentAliasEntry g_ComponentAliases[] = {
     { "SurfacePathInfluences", "eoc::SurfacePathInfluencesComponent" },
     { "SyncedTimelineActorControl", "eoc::SyncedTimelineActorControlComponent" },
     { "SyncedTimelineControl", "eoc::SyncedTimelineControlComponent" },
+    { "TLPreviewDummy", "ecl::TLPreviewDummy" },
     { "TadpolePowers", "eoc::tadpole_tree::PowerContainerComponent" },
     { "TadpoleTreeState", "eoc::tadpole_tree::TreeStateComponent" },
     { "Tag", "eoc::TagComponent" },

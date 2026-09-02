@@ -26,6 +26,7 @@ void register_deal_damage_payload_tests(void);
 void register_spell_meta_layout_tests(void);
 void register_component_alias_tests(void);
 void register_component_offsets_spell_tests(void);
+void register_server_object_layout_tests(void);
 
 int main(void) {
     printf("=== BG3SE Tier 0 Unit Tests ===\n\n");
@@ -47,6 +48,7 @@ int main(void) {
     register_spell_meta_layout_tests();
     register_component_alias_tests();
     register_component_offsets_spell_tests();
+    register_server_object_layout_tests();
 
     printf("\n=== Results: %d/%d passed, %d failed ===\n",
            g_passed, g_passed + g_failed, g_failed);

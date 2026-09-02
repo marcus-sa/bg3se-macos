@@ -2650,7 +2650,10 @@ static int lua_entity_index(lua_State *L) {
             handle,
             layout->componentTypeIndex,
             layout->componentSize,
-            false  // not proxy
+            // A proxy component's slot holds a pointer to the real object.
+            // Hardcoding false here made entity.ServerCharacter.Template read
+            // 0xC8 bytes into the storage page instead of into esv::Character.
+            layout->isProxy
         );
         if (component) {
             component_property_push_proxy(L, component, layout);

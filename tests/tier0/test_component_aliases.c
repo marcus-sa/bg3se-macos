@@ -57,6 +57,56 @@ TEST(alias_disambiguates_level) {
     ASSERT_STR_EQ(component_alias_lookup("EocLevel"), "eoc::LevelComponent");
 }
 
+TEST(alias_resolves_the_non_component_named_engine_classes) {
+    /*
+     * These fourteen were the whole of the "left unfixed" list: their engine
+     * classes are perfectly ordinary components with a real
+     * ls::TypeId<T, ecs::ComponentTypeIdContext>::m_TypeIndex, but their names
+     * do not end in "Component", and the TypeId extractor used to require that
+     * substring. No registry row meant no address to discover, so an alias row
+     * would have been inert — which is why they were deliberately absent rather
+     * than present-but-dead. tools/extract_typeids.py now keeps every
+     * ComponentTypeIdContext symbol, so all fourteen have an index to resolve.
+     *
+     * ServerCharacter and ServerItem are the two with known consumers:
+     * AppearanceEditEnhanced reads
+     * Ext.Entity.Get(uuid).ServerCharacter.Template.Icon.
+     */
+    ASSERT_STR_EQ(component_alias_lookup("ServerCharacter"), "esv::Character");
+    ASSERT_STR_EQ(component_alias_lookup("ServerItem"), "esv::Item");
+    ASSERT_STR_EQ(component_alias_lookup("ServerProjectile"), "esv::Projectile");
+    ASSERT_STR_EQ(component_alias_lookup("Scenery"), "ecl::Scenery");
+    ASSERT_STR_EQ(component_alias_lookup("TLPreviewDummy"), "ecl::TLPreviewDummy");
+    ASSERT_STR_EQ(component_alias_lookup("GlobalCombatRequests"),
+                  "esv::combat::GlobalCombatRequests");
+    ASSERT_STR_EQ(component_alias_lookup("DefaultCameraBehavior"),
+                  "ls::DefaultCameraBehavior");
+    ASSERT_STR_EQ(component_alias_lookup("EffectCameraBehavior"),
+                  "ls::EffectCameraBehavior");
+    ASSERT_STR_EQ(component_alias_lookup("GameCameraBehavior"),
+                  "ecl::GameCameraBehavior");
+    ASSERT_STR_EQ(component_alias_lookup("LongRestState"),
+                  "eoc::rest::LongRestState");
+    ASSERT_STR_EQ(component_alias_lookup("LongRestTimeline"),
+                  "eoc::rest::LongRestTimeline");
+    ASSERT_STR_EQ(component_alias_lookup("LongRestTimers"),
+                  "eoc::rest::LongRestTimers");
+    ASSERT_STR_EQ(component_alias_lookup("LongRestUsers"),
+                  "eoc::rest::LongRestUsers");
+    ASSERT_STR_EQ(component_alias_lookup("RestingEntities"),
+                  "eoc::rest::RestingEntities");
+}
+
+TEST(alias_table_covers_every_windows_pair) {
+    /*
+     * 643 DEFINE_COMPONENT pairs were read from Windows and 643 kept: nothing
+     * is dropped on this build any more. A regression that re-narrows the
+     * extracted surface would show up here as a shrunk table long before a mod
+     * hit "Unknown component type".
+     */
+    ASSERT_EQ(component_alias_count(), (size_t)643);
+}
+
 TEST(alias_unknown_and_degenerate_names_return_null) {
     ASSERT_NULL(component_alias_lookup("NoSuchComponentName"));
     ASSERT_NULL(component_alias_lookup(""));
@@ -101,6 +151,8 @@ void register_component_alias_tests(void) {
     RUN_TEST(alias_resolves_combatant_join_event);
     RUN_TEST(alias_resolves_inner_namespace_one_frame_components);
     RUN_TEST(alias_resolves_added_spells);
+    RUN_TEST(alias_resolves_the_non_component_named_engine_classes);
+    RUN_TEST(alias_table_covers_every_windows_pair);
     RUN_TEST(alias_disambiguates_level);
     RUN_TEST(alias_unknown_and_degenerate_names_return_null);
     RUN_TEST(alias_table_is_sorted_and_unique);

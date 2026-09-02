@@ -2229,6 +2229,10 @@ static const ComponentLayoutDef g_ClientCharacterComponent_Layout = {
     .componentSize = 0x158,
     .properties = NULL,
     .propertyCount = 0,
+    // Proxy component: the ECS slot holds a pointer to a heap object.
+    // GetComponentDestructor<ecl::Character> @0x100eaa7d0 opens `ldr x19, [x0]`
+    // before destroying, which is what proves the indirection.
+    .isProxy = true,
 };
 
 // Item (ecl::Item)
@@ -2240,6 +2244,10 @@ static const ComponentLayoutDef g_ClientItemComponent_Layout = {
     .componentSize = 0x70,
     .properties = NULL,
     .propertyCount = 0,
+    // Proxy component: the ECS slot holds a pointer to a heap object.
+    // GetComponentDestructor<ecl::Item> @0x100e41804 opens `ldr x19, [x0]`
+    // before destroying, which is what proves the indirection.
+    .isProxy = true,
 };
 
 // Projectile (ecl::Projectile)
@@ -2251,6 +2259,10 @@ static const ComponentLayoutDef g_ClientProjectileComponent_Layout = {
     .componentSize = 0x240,
     .properties = NULL,
     .propertyCount = 0,
+    // Proxy component: the ECS slot holds a pointer to a heap object.
+    // GetComponentDestructor<ecl::Projectile> @0x100e3fd04 opens `ldr x19, [x0]`
+    // before destroying, which is what proves the indirection.
+    .isProxy = true,
 };
 
 // Scenery (ecl::Scenery)
@@ -2262,6 +2274,10 @@ static const ComponentLayoutDef g_ClientSceneryComponent_Layout = {
     .componentSize = 0x40,
     .properties = NULL,
     .propertyCount = 0,
+    // Proxy component: the ECS slot holds a pointer to a heap object.
+    // GetComponentDestructor<ecl::Scenery> @0x100e3e514 opens `ldr x19, [x0]`
+    // before destroying, which is what proves the indirection.
+    .isProxy = true,
 };
 
 // PaperdollComponent (ecl::PaperdollComponent)
@@ -4656,17 +4672,109 @@ static const ComponentLayoutDef g_esv_CampRegionTrigger_Layout = {
     .propertyCount = sizeof(g_esv_CampRegionTrigger_Properties) / sizeof(g_esv_CampRegionTrigger_Properties[0]),
 };
 
-// esv::Character - 8 bytes (0x08)
+// ============================================================================
+// ServerCharacter (esv::Character) - 0x1a8 (424) bytes, PROXY component
+//
+// Derived from the 4.1.1.7398727 arm64 slice, not from the Windows header:
+// declaration order there is MSVC's and does not survive Apple arm64 packing.
+// Every offset below was read out of at least two independent functions; see
+// ghidra/offsets/SERVER_CHARACTER_ITEM_LAYOUT.md for the disassembly and the
+// repro commands.
+//
+// The ECS slot is 8 bytes holding an esv::Character*, hence .isProxy:
+//   ImmediateWorldCache::AddComponent<esv::Character, eoc::CharacterTemplate const*&>
+//   1052dbc2c  mov w0, #0x1a8        ; operator new
+//   1052dbc44  bl  esv::Character::Character(ls::GameObjectTemplate const*)
+//   1052dbc74  mov w1, #0x8          ; ComponentFrameStorageAllocRaw slot size
+//   1052dbc7c  str x25, [x0]         ; slot <- Character*
+// and GetComponentDestructor<esv::Character> @0x103bdeb6c opens `ldr x19,[x0]`.
+//
+// Pointer-valued fields are exposed as raw addresses and are read-only: the
+// template pointers are refcounted (SetTemplate calls Increase/DecreaseTemplate
+// RefCount around the store), so writing one through here would corrupt the
+// refcount. .Template therefore resolves to an address, not a template object --
+// there is no CharacterTemplate proxy in the property system yet.
+// ============================================================================
 static const ComponentPropertyDef g_esv_Character_Properties[] = {
-    { "CharacterPtr", 0x00, FIELD_TYPE_UINT64, 0, false },  // Ptr to 0x1a8 (424b) malloc
+    // esv::Character::GetEntityObjectHandle() @0x105169304: ldr x0,[x0,#0x10]
+    { "field_10",               0x10, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // esv::Character::IsFlag() @0x105169960: ldr x8,[x0,#0x18]; tst x8,x1
+    // (RaiseFlag @0x105169314 and ClearFlag @0x105169664 read/write the same)
+    { "Flags",                  0x18, FIELD_TYPE_UINT64,        0, true },
+    // esv::Character::GetEntityRef() @0x10516930c: add x0,x0,#0x20; ret.
+    // ecs::EntityRef is {EntityHandle, EntityWorld*}; only the handle is useful
+    // to a mod, so the trailing world pointer is deliberately not exposed.
+    { "MyHandle",               0x20, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // esv::Character::GetCurrentLevel() @0x10516a23c: add x0,x0,#0x30; ret
+    { "Level",                  0x30, FIELD_TYPE_FIXEDSTRING,   0, true },
+    // Offset and width are binary-proven -- the ctor stores a 64-bit -1 across
+    // 0x30/0x34 and ~Character releases both through ls::gst::Map::Release --
+    // but the NAME is only the FixedString Windows declares after Level.
+    { "VisualResource",         0x34, FIELD_TYPE_FIXEDSTRING,   0, true },
+    // esv::Character::GetTemplate() @0x10516929c is exactly
+    //   ldr x0, [x0, #0xc8] / ret
+    // SetTemplate @0x105169254 stores there between the refcount calls, and the
+    // ctor @0x10516e1f4 stores its CharacterTemplate argument to the same slot.
+    { "Template",               0xC8, FIELD_TYPE_UINT64,        0, true },
+    // esv::Character::SetOriginalTemplate @0x10516ac48/0x10516ac70
+    { "OriginalTemplate",       0xD0, FIELD_TYPE_UINT64,        0, true },
+    // LEGACY_CacheTemplatesIfNeeded @0x10516cc44/0x10516cc68 copies
+    // [this+0xd0] into [this+0xd8] after releasing the old value
+    { "TemplateUsedForSpells",  0xD8, FIELD_TYPE_UINT64,        0, true },
+    // SavegameVisit @0x10516f10c and Update @0x105173a5c both pass [this+0x130]
+    // to esv::StatusMachine methods, which is what types this field
+    { "StatusManager",          0x130, FIELD_TYPE_UINT64,       0, true },
+    // CreatePlayerData @0x1051718d8 guards on [this+0x150], constructs an
+    // esv::PlayerData and stores it back at 0x10517197c
+    { "PlayerData",             0x150, FIELD_TYPE_UINT64,       0, true },
+    // SetOwnerCharacter @0x105176680 stores its argument; GetOwnerUserID
+    // @0x1051757c8 walks the same field to find the owning character
+    { "OwnerCharacter",         0x158, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // SetFollowCharacter @0x10517161c stores its argument
+    { "FollowCharacter",        0x160, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // SetEnemyCharacter reads the old value @0x1051768d0 and stores the new one
+    // @0x10517694c
+    { "EnemyCharacter",         0x170, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // GetOwnerUserID @0x105175820 returns ldr w0,[x19,#0x184]
+    { "UserID",                 0x184, FIELD_TYPE_INT32,        0, true },
+    // GetReservedForUserID @0x1051726dc returns ldr w0,[x19,#0x188]
+    { "UserID2",                0x188, FIELD_TYPE_INT32,        0, true },
+    // ctor @0x10516e1c0 stores 1.0f here; msmoveto_helpers::GetModifiedMovement
+    // Speed @0x104b21988 does ldr s0,[x20,#0x18c]; fmul s0, s8, s0
+    { "GeneralSpeedMultiplier", 0x18C, FIELD_TYPE_FLOAT,        0, true },
+    /*
+     * Deliberately absent:
+     *   0x38..0xC8  nine Array<T> slots (proven by ~CharacterColdData, which
+     *               destroys exactly nine), but only the first is independently
+     *               typed. Windows names Summons/Treasures/DisabledCrime/... in
+     *               a declaration order that this build is already known to
+     *               reorder, so naming them would be a guess.
+     *   0xE0..0x148 the AI/dialog/controller pointer block. Windows declares
+     *               five same-typed controller pointers here and two of the
+     *               macOS slots are esv::TaskController*, so which is which is
+     *               not recoverable.
+     *   Inventory   no call site binds any field to an inventory API. The
+     *               EntityHandle at 0x168 is resolved through
+     *               GetComponent<esv::Character>, so it holds a character, not
+     *               an inventory -- and the macOS handle order already differs
+     *               from Windows (Owner 0x158, Follow 0x160, ? 0x168, Enemy
+     *               0x170), so assuming 0x168 is Inventory would repeat exactly
+     *               the mistake that mapped Level to the wrong component.
+     */
 };
 static const ComponentLayoutDef g_esv_Character_Layout = {
     .componentName = "esv::Character",
-    .shortName = "Character",
+    // Windows BG3SE spells this component "ServerCharacter"
+    // (Character.h:62 DEFINE_COMPONENT(ServerCharacter, "esv::Character")).
+    // The old "Character" here was a port-invented name that could never
+    // resolve anyway -- esv::Character had no registry row, so the layout's
+    // type index stayed 0 and entity.Character always read nil.
+    .shortName = "ServerCharacter",
     .componentTypeIndex = 0,
-    .componentSize = 0x08,
+    .componentSize = 0x1a8,
     .properties = g_esv_Character_Properties,
     .propertyCount = sizeof(g_esv_Character_Properties) / sizeof(g_esv_Character_Properties[0]),
+    .isProxy = true,
 };
 
 // esv::CharacterComponent - 24 bytes (0x18)
@@ -5113,17 +5221,85 @@ static const ComponentLayoutDef g_esv_IsGlobalComponent_Layout = {
     .propertyCount = sizeof(g_esv_IsGlobalComponent_Properties) / sizeof(g_esv_IsGlobalComponent_Properties[0]),
 };
 
-// esv::Item - 8 bytes (0x08)
+// ============================================================================
+// ServerItem (esv::Item) - 0xb0 (176) bytes, PROXY component
+//
+// Derived from the 4.1.1.7398727 arm64 slice; see
+// ghidra/offsets/SERVER_CHARACTER_ITEM_LAYOUT.md for disassembly and repros.
+//
+// The ECS slot is 8 bytes holding an esv::Item*, hence .isProxy:
+//   AddComponent<esv::Item, eoc::ItemTemplate* const&>
+//   1052d8844  mov w0, #0xb0        ; operator new
+//   1052d885c  bl  esv::Item::Item(ls::GameObjectTemplate const*)
+// and GetComponentDestructor<esv::Item> @0x103bd304c opens `ldr x19,[x0]`.
+//
+// Unlike esv::Character, the derived offsets here line up with the Windows
+// declaration order all the way to 0xa0, which is independent corroboration --
+// but the tail diverges (Windows declares TreasureLevel/Amount/Flags2 where
+// this build has one int32 at 0xa4 and four separate bytes at 0xa8..0xab), so
+// nothing at or past 0xa4 is named here.
+// ============================================================================
 static const ComponentPropertyDef g_esv_Item_Properties[] = {
-    { "ItemPtr", 0x00, FIELD_TYPE_UINT64, 0, false },  // Ptr to 0xb0 (176b) malloc
+    // esv::Item::GetEntityObjectHandle() @0x105461cc4: ldr x0,[x0,#0x10]
+    { "field_10",         0x10, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // esv::Item::IsFlag() @0x1054625f0: ldr x8,[x0,#0x18]; tst x8,x1
+    { "Flags",            0x18, FIELD_TYPE_UINT64,        0, true },
+    // esv::Item::GetEntityRef() @0x105461ccc: add x0,x0,#0x20; ret
+    { "MyHandle",         0x20, FIELD_TYPE_ENTITY_HANDLE, 0, true },
+    // esv::Item::GetCurrentLevel() @0x105463058: add x0,x0,#0x30; ret
+    { "Level",            0x30, FIELD_TYPE_FIXEDSTRING,   0, true },
+    // Offset/width binary-proven (ctor acquires it, ~Item releases it); the
+    // NAME is the FixedString Windows declares immediately after Level.
+    { "ItemType",         0x34, FIELD_TYPE_FIXEDSTRING,   0, true },
+    // esv::Item::GetTemplate() @0x105461c5c is exactly
+    //   ldr x0, [x0, #0x48] / ret
+    // SetTemplate @0x105461c4c stores there between the refcount calls, and the
+    // ctor @0x105466c60 stores its ItemTemplate argument to the same slot.
+    { "Template",         0x48, FIELD_TYPE_UINT64,        0, true },
+    // esv::Item::SetOriginalTemplate @0x105463f60/0x105463f88
+    { "OriginalTemplate", 0x50, FIELD_TYPE_UINT64,        0, true },
+    // [this+0x58] is passed to esv::ItemMachine::CreateState @0x105462b00
+    { "ItemMachine",      0x58, FIELD_TYPE_UINT64,        0, true },
+    // [this+0x60] is passed to esv::PlanManager::OnSuspend @0x105463788
+    { "PlanManager",      0x60, FIELD_TYPE_UINT64,        0, true },
+    // [this+0x68] is passed to ls::VariableManager::Visit @0x105467cc8
+    { "VariableManager",  0x68, FIELD_TYPE_UINT64,        0, true },
+    // [this+0x70] is passed to esv::StatusMachine::SavegameVisit @0x105467dc8
+    { "StatusManager",    0x70, FIELD_TYPE_UINT64,        0, true },
+    // esv::Item::SetStatsId @0x10546986c stores the resolved stats object here
+    // after looking it up by the FixedString at 0x9c
+    { "StatsObject",      0x78, FIELD_TYPE_UINT64,        0, true },
+    // esv::Item::SetStatsId @0x1054697f0/0x105469838 reads then writes 0x9c
+    // with gst::Acquire / gst::Map::Release around it
+    { "Stats",            0x9C, FIELD_TYPE_FIXEDSTRING,   0, true },
+    /*
+     * Deliberately absent:
+     *   0x38  Array<UserId> UpdatePeerIds -- the slot is proven, the element
+     *         type is not, and the property system has no UserId array reader.
+     *   0x80, 0x88, 0x90, 0x98, 0xa0  read/written but never passed to a
+     *         type-revealing callee. 0x90 is an EntityHandle that
+     *         SetInUseByCharacter manages; "in use by" is not the same thing as
+     *         Windows' OwnerCharacter, so it is not exposed under that name.
+     *   0xa4..0xac  the layout diverges from Windows here (see header comment),
+     *         so TreasureLevel / Amount / Flags2 cannot be placed. IsGlobal
+     *         @0x105461c98 does read bit 1 of the byte at 0xac, but a
+     *         single-bit accessor does not name the byte.
+     *   Amount / Vitality  no such field: esv::Item::SetAmount @0x10546883c
+     *         writes no member, it queues an inventory StackSystem request.
+     */
 };
 static const ComponentLayoutDef g_esv_Item_Layout = {
     .componentName = "esv::Item",
-    .shortName = "Item",
+    // Windows BG3SE spells this component "ServerItem"
+    // (Item.h:10 DEFINE_COMPONENT(ServerItem, "esv::Item")). The old "Item"
+    // was a port-invented name that could never resolve: esv::Item had no
+    // registry row, so the layout's type index stayed 0 and entity.Item was nil.
+    .shortName = "ServerItem",
     .componentTypeIndex = 0,
-    .componentSize = 0x08,
+    .componentSize = 0xb0,
     .properties = g_esv_Item_Properties,
     .propertyCount = sizeof(g_esv_Item_Properties) / sizeof(g_esv_Item_Properties[0]),
+    .isProxy = true,
 };
 
 // esv::ItemComponent - 24 bytes (0x18)
@@ -5251,7 +5427,11 @@ static const ComponentPropertyDef g_esv_Projectile_Properties[] = {
 };
 static const ComponentLayoutDef g_esv_Projectile_Layout = {
     .componentName = "esv::Projectile",
-    .shortName = "Projectile",
+    // Windows BG3SE spells this "ServerProjectile"
+    // (Components/Projectile.h:120). No field offsets are derived here, so the
+    // layout keeps modelling the 8-byte ECS slot itself: ProjectilePtr is the
+    // esv::Projectile* the slot holds, which is why .isProxy stays false.
+    .shortName = "ServerProjectile",
     .componentTypeIndex = 0,
     .componentSize = 0x08,
     .properties = g_esv_Projectile_Properties,

@@ -366,6 +366,47 @@ bool component_typeid_read(uint64_t preferred_va, uint16_t *outIndex) {
     return true;
 }
 
+bool component_typeid_read_guarded(uint64_t preferred_va, uint64_t guard_va,
+                                   uint16_t *outIndex) {
+    /*
+     * m_TypeIndex is a function-local static: it is 0 in the file image and
+     * stays 0 until the game first instantiates the type. component_typeid_read
+     * accepts 0 because 0 is a legal index -- exactly one component really owns
+     * it -- so without the guard an unresolved type is indistinguishable from
+     * that one component, and registering it binds the name to a foreign
+     * storage slot. Widening the extracted surface made that reachable in bulk:
+     * classes like ls::EditorCameraBehavior ship with a TypeId global that the
+     * shipped game may never resolve.
+     *
+     * The Itanium ABI writes the guard byte only after the initialiser has run,
+     * so guard != 0 implies the index beside it is the real one. Checking the
+     * guard first is therefore ordered correctly.
+     */
+    if (guard_va != 0) {
+        mach_vm_address_t guardAddr = 0;
+        if (!component_typeid_ready() ||
+            !component_typeid_runtime_address(guard_va, &guardAddr)) {
+            return false;
+        }
+        uint8_t guardByte = 0;
+        if (!safe_memory_read_u8(guardAddr, &guardByte)) {
+            LOG_ENTITY_DEBUG("  Failed to read guard at 0x%llx (preferred VA 0x%llx)",
+                             (unsigned long long)guardAddr,
+                             (unsigned long long)guard_va);
+            return false;
+        }
+        if (guardByte == 0) {
+            LOG_ENTITY_DEBUG("  TypeId at preferred VA 0x%llx not resolved yet "
+                             "(guard 0x%llx is clear)",
+                             (unsigned long long)preferred_va,
+                             (unsigned long long)guard_va);
+            return false;
+        }
+    }
+
+    return component_typeid_read(preferred_va, outIndex);
+}
+
 // ============================================================================
 // Discovery
 // ============================================================================
@@ -406,8 +447,19 @@ int component_typeid_discover(void) {
                              entry->componentName);
             continue;
         }
+        /*
+         * Gate on the static's guard for the same reason the generated loop
+         * does: an unresolved m_TypeIndex reads 0, and index 0 belongs to a
+         * real component. A curated entry skipped here is retried by
+         * entity_retry_typeid_discovery().
+         */
+        uint64_t guard_va = 0;
+        (void)component_typeid_generated_guard_lookup(entry->componentName,
+                                                      entry->context,
+                                                      &guard_va);
         uint16_t typeIndex = 0;
-        bool success = component_typeid_read(preferred_va, &typeIndex);
+        bool success = component_typeid_read_guarded(preferred_va, guard_va,
+                                                     &typeIndex);
 
         if (success) {
             // One-frame components need the high storage-pool bit set.

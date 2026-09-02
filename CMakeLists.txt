@@ -400,6 +400,7 @@ if(BUILD_TESTS)
         tests/tier0/test_spell_meta_layout.c
         tests/tier0/test_component_aliases.c
         tests/tier0/test_component_offsets_spells.c
+        tests/tier0/test_server_object_layout.c
         tests/tier0/stub_logging.c
         src/core/safe_memory.c
         src/entity/guid_lookup.c

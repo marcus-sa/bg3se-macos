@@ -94,6 +94,20 @@ typedef struct {
     const ComponentPropertyDef *properties;
     int propertyCount;
     bool generated;                         // Unverified generated-property layout
+    /*
+     * Proxy component: the ECS slot holds a pointer to a separately heap-
+     * allocated object rather than the object itself, so the lookup must
+     * dereference once before any offset below applies.
+     *
+     * esv::Character is one: AddComponent<esv::Character> mallocs 0x1a8 bytes,
+     * runs the ctor on it, then asks ComponentFrameStorageAllocRaw for a slot
+     * of size 8 and stores the pointer there (0x1052dbc2c..0x1052dbc7c), and
+     * GetComponentDestructor<esv::Character> opens with `ldr x19, [x0]` before
+     * destroying and freeing. Reading it flat would apply Template's 0xC8 to
+     * the slot address and hand a mod whatever is 0xC8 bytes into the storage
+     * page. Defaults to false, which is the flat layout every other row uses.
+     */
+    bool isProxy;
 } ComponentLayoutDef;
 
 // ============================================================================

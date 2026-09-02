@@ -27,9 +27,13 @@ ONE_FRAME_CONTEXT = "ecs::OneFrameComponentTypeIdContext"
 REPLICATED_CONTEXT = "ecs::sync::ReplicatedTypeContext"
 SYSTEM_CONTEXT = "ecs::SystemsContext"
 
-# These are real ComponentTypeIdContext types used by the curated overlay, but
-# their C++ names predate the *Component naming convention.  They are emitted
-# as lookup authority without changing the measured 2,004-component surface.
+# These are real ComponentTypeIdContext types used by the curated overlay whose
+# C++ names predate the *Component naming convention.  They predate
+# component_surface() covering every ComponentTypeIdContext symbol, so they are
+# now also part of the surface.  The array is still emitted: dropping it would
+# make a regenerated registry non-additive against the committed one, and
+# component_typeid_generated_lookup() searches the surface first, so the
+# duplicate rows are inert.
 CURATED_NON_SURFACE_COMPONENTS = (
     "ecl::Character",
     "ecl::Item",
@@ -145,6 +149,17 @@ class TypeIdSymbol:
     raw_mangled_symbol: str
     build_id: str
     symbol_type: str
+    # Address of the Itanium-ABI guard variable for this m_TypeIndex.  Every
+    # m_TypeIndex is a function-local static that ships as 0 with a zero guard,
+    # so a read before the game first resolves the type yields 0 -- a perfectly
+    # valid index belonging to whichever component registered first.  The guard
+    # is the only way to tell "index 0" from "not resolved yet"; see
+    # ghidra/offsets/STATICDATA_HEADMASTER_LOOKUP.md for the same defect
+    # diagnosed on the static-data side.  It is NOT always at m_TypeIndex + 8:
+    # on 4.1.1.7398727, 7 of the 2106 component contexts have a 4-byte-aligned
+    # index with the guard packed at +4, so the address must be carried, not
+    # computed.  0 means "no guard symbol recorded" (synthetic records only).
+    guard_va: int = 0
 
 
 @dataclass(frozen=True)
@@ -215,6 +230,7 @@ def parse_nm_typeids(
 
     requested_contexts = tuple(contexts)
     candidates: list[tuple[int, str, str]] = []
+    guard_vas: dict[str, int] = {}
     for line in nm_output.splitlines():
         match = _NM_LINE.match(line)
         if not match:
@@ -222,11 +238,13 @@ def parse_nm_typeids(
         preferred_va = int(match.group(1), 16)
         symbol_type = match.group(2)
         raw_symbol = match.group(3)
-        if (
-            not raw_symbol.startswith("__ZN2ls6TypeIdI")
-            or not raw_symbol.endswith("11m_TypeIndexE")
-            or raw_symbol.startswith("__ZGV")
-        ):
+        if not raw_symbol.endswith("11m_TypeIndexE"):
+            continue
+        if raw_symbol.startswith("__ZGVN2ls6TypeIdI"):
+            # "__ZGV" + <mangled name> is the guard for "__Z" + <mangled name>.
+            guard_vas["__Z" + raw_symbol[len("__ZGV") :]] = preferred_va
+            continue
+        if not raw_symbol.startswith("__ZN2ls6TypeIdI"):
             continue
         candidates.append((preferred_va, symbol_type, raw_symbol))
 
@@ -260,6 +278,7 @@ def parse_nm_typeids(
             raw_mangled_symbol=raw_symbol,
             build_id=build_id,
             symbol_type=symbol_type,
+            guard_va=guard_vas.get(raw_symbol, 0),
         )
         key = (context, component_name)
         previous = records.get(key)
@@ -310,14 +329,33 @@ def extract_system_contexts(
 
 
 def component_surface(records: Iterable[TypeIdSymbol]) -> list[TypeIdSymbol]:
-    """Return the public ordinary-component surface measured by this project."""
+    """Return every ordinary-component TypeId context in the binary.
 
-    return sorted(
-        record
-        for record in records
-        if record.context == COMPONENT_CONTEXT
-        and "Component" in record.component_name
+    This used to additionally require "Component" in the class name, which is a
+    naming convention rather than a property of the ECS: `esv::Character`,
+    `esv::Item`, `ecl::Scenery` and the whole `eoc::rest::LongRest*` family all
+    carry a real `ecs::ComponentTypeIdContext` TypeId and are perfectly ordinary
+    components.  The filter dropped 88 of them, and because
+    `generated_component_registry.c` is the only place a TypeId address is
+    recorded, a dropped class had no index to discover at runtime -- which in
+    turn made its BG3SE short name unusable: `Ext.Entity.OnCreate` raised on
+    "ServerCharacter" and `entity.ServerItem` read nil, with no way for an alias
+    row to help.
+    """
+
+    surface = sorted(
+        record for record in records if record.context == COMPONENT_CONTEXT
     )
+    unguarded = [record.component_name for record in surface if not record.guard_va]
+    if unguarded:
+        # Without a guard there is no way to tell a real index 0 from an
+        # unresolved static, and registering the wrong one hands a mod another
+        # component's memory. Refuse to emit rather than emit an ungated row.
+        raise ExtractionError(
+            "no guard variable found for "
+            f"{len(unguarded)} component TypeId(s): {', '.join(unguarded[:5])}"
+        )
+    return surface
 
 
 def _require_named_records(
@@ -607,6 +645,7 @@ def generate_registration_code(
             "",
             '#include "component_registry.h"',
             '#include "component_typeid.h"',
+            '#include "component_property.h"',
             '#include "generated_typeids.h"',
             '#include "../core/logging.h"',
             "",
@@ -637,6 +676,47 @@ def generate_registration_code(
         [
             "};",
             "",
+            "/*",
+            " * Guard-variable addresses, one per row of the array above it, in the same",
+            " * order. Each m_TypeIndex is an Itanium-ABI function-local static: it ships",
+            " * as 0 with a zero guard, so reading it before the game first resolves that",
+            " * type yields 0 -- which is a perfectly valid index belonging to whichever",
+            " * component registered first. Registering on that read hands a mod another",
+            " * component's memory; the same defect on the static-data side is written up",
+            " * in ghidra/offsets/STATICDATA_HEADMASTER_LOOKUP.md.",
+            " *",
+            " * These are carried rather than computed as m_TypeIndex + 8: on",
+            " * 4.1.1.7398727 seven of the component contexts have a 4-byte-aligned index",
+            " * with the guard packed at +4, and a fixed +8 would read the *next*",
+            " * component's index as this one's guard.",
+            " *",
+            " * A parallel array rather than a sixth struct member so that widening the",
+            " * extracted surface stays a purely additive diff on the rows above.",
+            " */",
+        ]
+    )
+    for array_name, records in (
+        ("g_GeneratedComponentGuardVas", sorted(surface)),
+        ("g_CuratedOnlyGuardVas", curated_only),
+        ("g_OneFrameGuardVas", one_frame),
+    ):
+        lines.append(f"static const uint64_t {array_name}[] = {{")
+        lines.extend(f"    0x{record.guard_va:x}ULL," for record in records)
+        lines.extend(["};", ""])
+    lines.extend(
+        [
+            "static_assert(sizeof(g_GeneratedComponentGuardVas) / sizeof(uint64_t) ==",
+            "              GENERATED_TYPEIDS_COMPONENT_COUNT,",
+            "              \"guard table must stay parallel to the component table\");",
+            "static_assert(sizeof(g_CuratedOnlyGuardVas) ==",
+            "              sizeof(g_CuratedOnlyAuthority) /",
+            "                  sizeof(g_CuratedOnlyAuthority[0]) * sizeof(uint64_t),",
+            "              \"guard table must stay parallel to the curated table\");",
+            "static_assert(sizeof(g_OneFrameGuardVas) ==",
+            "              sizeof(g_OneFrameAuthority) /",
+            "                  sizeof(g_OneFrameAuthority[0]) * sizeof(uint64_t),",
+            "              \"guard table must stay parallel to the one-frame table\");",
+            "",
             "static const GeneratedComponentEntry *find_generated_entry(",
             "    const GeneratedComponentEntry *entries, size_t count,",
             "    const char *name, const char *context) {",
@@ -649,30 +729,55 @@ def generate_registration_code(
             "    return NULL;",
             "}",
             "",
+            "typedef struct {",
+            "    const GeneratedComponentEntry *entries;",
+            "    const uint64_t *guards;",
+            "    size_t count;",
+            "} GeneratedAuthorityTable;",
+            "",
+            "static const GeneratedComponentEntry *find_generated_authority(",
+            "    const char *name, const char *context, uint64_t *out_guard_va) {",
+            "    const GeneratedAuthorityTable tables[] = {",
+            "        { g_GeneratedComponents, g_GeneratedComponentGuardVas,",
+            "          GENERATED_TYPEIDS_COMPONENT_COUNT },",
+            "        { g_CuratedOnlyAuthority, g_CuratedOnlyGuardVas,",
+            "          sizeof(g_CuratedOnlyAuthority) / sizeof(g_CuratedOnlyAuthority[0]) },",
+            "        { g_OneFrameAuthority, g_OneFrameGuardVas,",
+            "          sizeof(g_OneFrameAuthority) / sizeof(g_OneFrameAuthority[0]) },",
+            "    };",
+            "    for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {",
+            "        const GeneratedComponentEntry *entry = find_generated_entry(",
+            "            tables[t].entries, tables[t].count, name, context);",
+            "        if (!entry) continue;",
+            "        if (strcmp(entry->build_id, GENERATED_TYPEIDS_BUILD_ID) != 0) return NULL;",
+            "        if (out_guard_va) {",
+            "            *out_guard_va = tables[t].guards[entry - tables[t].entries];",
+            "        }",
+            "        return entry;",
+            "    }",
+            "    return NULL;",
+            "}",
+            "",
             "bool component_typeid_generated_lookup(const char *name,",
             "                                       const char *context,",
             "                                       uint64_t *out_va) {",
             "    if (!name || !context || !out_va) return false;",
             "",
-            "    const GeneratedComponentEntry *entry = find_generated_entry(",
-            "        g_GeneratedComponents, GENERATED_TYPEIDS_COMPONENT_COUNT,",
-            "        name, context);",
-            "    if (!entry) {",
-            "        entry = find_generated_entry(",
-            "            g_CuratedOnlyAuthority,",
-            "            sizeof(g_CuratedOnlyAuthority) / sizeof(g_CuratedOnlyAuthority[0]),",
-            "            name, context);",
-            "    }",
-            "    if (!entry) {",
-            "        entry = find_generated_entry(",
-            "            g_OneFrameAuthority,",
-            "            sizeof(g_OneFrameAuthority) / sizeof(g_OneFrameAuthority[0]),",
-            "            name, context);",
-            "    }",
-            "    if (!entry || strcmp(entry->build_id, GENERATED_TYPEIDS_BUILD_ID) != 0) {",
-            "        return false;",
-            "    }",
+            "    const GeneratedComponentEntry *entry =",
+            "        find_generated_authority(name, context, NULL);",
+            "    if (!entry) return false;",
             "    *out_va = entry->preferred_va;",
+            "    return true;",
+            "}",
+            "",
+            "bool component_typeid_generated_guard_lookup(const char *name,",
+            "                                             const char *context,",
+            "                                             uint64_t *out_guard_va) {",
+            "    if (!name || !context || !out_guard_va) return false;",
+            "",
+            "    uint64_t guard_va = 0;",
+            "    if (!find_generated_authority(name, context, &guard_va)) return false;",
+            "    *out_guard_va = guard_va;",
             "    return true;",
             "}",
             "",
@@ -698,8 +803,29 @@ def generate_registration_code(
             "        const GeneratedComponentEntry *entry = &g_GeneratedComponents[i];",
             "        if (component_typeid_is_curated(entry->name)) continue;",
             "        uint16_t type_index = 0;",
-            "        if (component_typeid_read(entry->preferred_va, &type_index) &&",
+            "        /*",
+            "         * Guarded read: a still-unresolved m_TypeIndex reads 0, and index 0",
+            "         * belongs to whichever component registered first, so an ungated read",
+            "         * would register this name onto that component's storage slot. Skipped",
+            "         * entries are picked up by entity_retry_typeid_discovery() once the",
+            "         * game has run the static's guard.",
+            "         */",
+            "        if (component_typeid_read_guarded(entry->preferred_va,",
+            "                                         g_GeneratedComponentGuardVas[i],",
+            "                                         &type_index) &&",
             "            component_registry_register(entry->name, type_index, 0, false)) {",
+            "            /*",
+            "             * The registry knowing the index is not enough. Property access goes",
+            "             * through the layout table, and a layout whose type index is still",
+            "             * zero reads as absent -- so any component we have offsets for but",
+            "             * that is not in the curated list returned nil.",
+            "             *",
+            "             * ls::uuid::Component is one: entity.Uuid came back nil while",
+            "             * entity.Health worked, purely because Health is curated and Uuid is",
+            "             * not. Setting it here covers every generated component with a",
+            "             * layout, and is a no-op for the ones without.",
+            "             */",
+            "            component_property_set_type_index(entry->name, type_index);",
             "            discovered++;",
             "        }",
             "    }",
