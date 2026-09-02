@@ -115,6 +115,46 @@ TEST(candidates_tolerates_null) {
     ASSERT_EQ(shader_alias_candidates(NULL, c), 0);
 }
 
+TEST(variant_parses_simple_suffix) {
+    char v[16];
+    ASSERT_TRUE(shader_alias_variant(MOD_ROOT DECAL, v, sizeof(v)));
+    ASSERT_STR_EQ(v, "DEF");
+}
+
+TEST(variant_parses_multi_letter_suffixes) {
+    char v[16];
+    const char *cases[][2] = {
+        {"X_ST_DEPST_Metal.bshd",  "DEPST"},
+        {"X_STI_DEPS_Metal.bshd",  "DEPS"},
+        {"X_STI_VEL_Metal.bshd",   "VEL"},
+        {"X_ST_EMI_Metal.bshd",    "EMI"},
+        {"X_STI_FOR_Metal.bshd",   "FOR"},
+        {"X_ST_BAKE_Metal.bshd",   "BAKE"},
+    };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        ASSERT_TRUE(shader_alias_variant(cases[i][0], v, sizeof(v)));
+        ASSERT_STR_EQ(v, cases[i][1]);
+    }
+}
+
+TEST(variant_rejects_non_metal_names) {
+    char v[16];
+    /* Engine shaders carry no _Metal.bshd variant tail. */
+    ASSERT_FALSE(shader_alias_variant(
+        "Shaders/Metal/VelocityBufferStaticInstanced.bshd", v, sizeof(v)));
+    ASSERT_FALSE(shader_alias_variant("CHAR_Hair_STI_DEF", v, sizeof(v)));
+}
+
+TEST(variant_fails_closed_on_small_buffer) {
+    char v[3];
+    ASSERT_FALSE(shader_alias_variant("X_ST_DEPST_Metal.bshd", v, sizeof(v)));
+}
+
+TEST(variant_tolerates_null) {
+    char v[16];
+    ASSERT_FALSE(shader_alias_variant(NULL, v, sizeof(v)));
+}
+
 void register_shader_alias_tests(void);
 void register_shader_alias_tests(void) {
     printf("shader_alias:\n");
@@ -131,4 +171,9 @@ void register_shader_alias_tests(void) {
     RUN_TEST(candidates_empty_for_engine_shader_with_no_alias);
     RUN_TEST(candidates_never_returns_the_original_name);
     RUN_TEST(candidates_tolerates_null);
+    RUN_TEST(variant_parses_simple_suffix);
+    RUN_TEST(variant_parses_multi_letter_suffixes);
+    RUN_TEST(variant_rejects_non_metal_names);
+    RUN_TEST(variant_fails_closed_on_small_buffer);
+    RUN_TEST(variant_tolerates_null);
 }

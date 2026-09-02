@@ -66,16 +66,55 @@ typedef enum {
     ALIAS_FULL       /* + namespace rewriting for every category */
 } AliasMode;
 
-/* Default to decals. A miss is not uniformly fatal: the engine skips most
- * draws whose shader is missing -- this mod's materials were ALL missing
- * before namespace rewriting existed, and the game rendered -- but a decal
- * miss faults, and we have the stack to prove it (ls::DecalObject::Render,
- * KERN_INVALID_ADDRESS at 0x30, EmissiveRenderStage worker). Rewriting every
- * category to fix the one that crashes turned 132 materials into substitutes
- * and painted the screen with streaks; rewriting only decals keeps the
- * Immolation Aura fix and drops ~98% of the substitutions (30 of 1362 in the
- * session that regressed). */
-static AliasMode s_mode = ALIAS_DECAL;
+/* Full, minus the velocity variant. Three observed outcomes pin this down:
+ *
+ *   nothing aliased  -> Immolation Aura crashes instantly (decal null pipeline)
+ *   decals only      -> no corruption, but the aura hangs the whole game
+ *   everything       -> aura renders, whole screen streaks with RGB "lightning"
+ *
+ * Partial aliasing being WORSE than none says an effect needs all of its
+ * materials or none: aliasing the decal while its sibling Model/ParticleSystem
+ * materials stay missing leaves the effect half-built. So the split is not by
+ * category -- it is by render variant.
+ *
+ * _VEL writes motion vectors. Garbage there feeds TAA, which smears across the
+ * entire frame and flickers between frames -- "lightning going everywhere, on
+ * and off". And a missing velocity shader is demonstrably survivable here:
+ * Shaders/Metal/VelocityBufferStaticInstanced.bshd misses in every session and
+ * never faulted, because this macOS build ships no *StaticInstanced* symbol at
+ * all -- instanced static velocity is simply absent from the platform. */
+static AliasMode s_mode = ALIAS_FULL;
+
+/* Render variants never substituted. Comma-separated, BG3SE_SHADER_ALIAS_SKIP. */
+#define MAX_SKIP_VARIANTS 8
+static char s_skip[MAX_SKIP_VARIANTS][16];
+static int  s_skip_count = 0;
+
+static void skip_variants_init(void) {
+    const char *e = getenv("BG3SE_SHADER_ALIAS_SKIP");
+    if (!e) e = "VEL";                    /* default: motion vectors only */
+    while (*e && s_skip_count < MAX_SKIP_VARIANTS) {
+        while (*e == ',' || *e == ' ') e++;
+        size_t n = 0;
+        while (e[n] && e[n] != ',' && e[n] != ' ') n++;
+        if (n > 0 && n < sizeof(s_skip[0])) {
+            memcpy(s_skip[s_skip_count], e, n);
+            s_skip[s_skip_count][n] = '\0';
+            s_skip_count++;
+        }
+        e += n;
+    }
+}
+
+static bool variant_is_skipped(const char *name) {
+    char v[16];
+    if (s_skip_count == 0) return false;
+    if (!shader_alias_variant(name, v, sizeof(v))) return false;
+    for (int i = 0; i < s_skip_count; i++) {
+        if (strcmp(v, s_skip[i]) == 0) return true;
+    }
+    return false;
+}
 
 /* Larian keys material category off the containing folder, and the rewrite
  * preserves it, so the source path tells us the category. */
@@ -105,6 +144,11 @@ __attribute__((noinline))
 static uint64_t resolve_alias(void *mgr, const char *name) {
     char cands[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
     int n = 0;
+
+    if (variant_is_skipped(name)) {
+        LOG_CORE_INFO("ShaderCloneShim: MISS '%s' (variant not aliased)", name);
+        return SHADERID_INVALID;
+    }
 
     bool rewrite = (s_mode == ALIAS_FULL)
                 || (s_mode == ALIAS_DECAL && is_decal_material(name));
@@ -173,11 +217,20 @@ bool shader_clone_shim_init(void *binary_base) {
     }
 
     alias_mode_init();
+    skip_variants_init();
     s_installed = true;
     LOG_CORE_INFO("ShaderCloneShim: installed (mode=%s)",
                   s_mode == ALIAS_OFF   ? "off"
                 : s_mode == ALIAS_UUID  ? "uuid (material-name clones only)"
                 : s_mode == ALIAS_DECAL ? "decal (clones + namespace rewrite for decals)"
                                         : "full (clones + namespace rewrite, all categories)");
+    if (s_skip_count > 0) {
+        char buf[128]; size_t o = 0;
+        for (int i = 0; i < s_skip_count && o < sizeof(buf) - 1; i++) {
+            o += (size_t)snprintf(buf + o, sizeof(buf) - o, "%s%s",
+                                  i ? "," : "", s_skip[i]);
+        }
+        LOG_CORE_INFO("ShaderCloneShim: variants never aliased: %s", buf);
+    }
     return true;
 }

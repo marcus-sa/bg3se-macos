@@ -25,6 +25,11 @@ bool shader_alias_strip_uuid(const char *name, char *out, size_t out_size);
  * Returns false when there is no such component, or it is already `Shared`. */
 bool shader_alias_base_root(const char *name, char *out, size_t out_size);
 
+/* Extract the render-variant token from a shader name: the last `_`-separated
+ * token before the `_Metal.bshd` tail (DEF, DEP, DEPS, DEPST, EMI, FOR, VEL,
+ * BAKE...). Returns false when the name has no such shape. */
+bool shader_alias_variant(const char *name, char *out, size_t out_size);
+
 /* Fill `out` with the names to retry, in priority order, and return how many
  * were written (0 when `name` has no alias shape at all). */
 int shader_alias_candidates(const char *name,

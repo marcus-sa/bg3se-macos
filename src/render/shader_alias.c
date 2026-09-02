@@ -98,6 +98,25 @@ bool shader_alias_base_root(const char *name, char *out, size_t out_size) {
     return true;
 }
 
+bool shader_alias_variant(const char *name, char *out, size_t out_size) {
+    static const char kTail[] = "_Metal.bshd";
+    if (!name || !out) return false;
+
+    size_t len = strlen(name);
+    size_t tail = sizeof(kTail) - 1;
+    if (len <= tail || memcmp(name + len - tail, kTail, tail) != 0) return false;
+
+    size_t end = len - tail;                       /* one past the variant */
+    size_t i = end;
+    while (i > 0 && name[i - 1] != '_') i--;       /* start of last token */
+    size_t n = end - i;
+    if (n == 0 || n + 1 > out_size) return false;
+
+    memcpy(out, name + i, n);
+    out[n] = '\0';
+    return true;
+}
+
 int shader_alias_candidates(const char *name,
                             char out[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX]) {
     int n = 0;
