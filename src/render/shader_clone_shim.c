@@ -66,22 +66,30 @@ typedef enum {
     ALIAS_FULL       /* + namespace rewriting for every category */
 } AliasMode;
 
-/* Alias as widely as possible. Four runs converge on one rule -- a miss is
- * never free:
+/* Clones only. The two mechanisms here have different track records, and a
+ * control run with aliasing disabled entirely finally separated them:
  *
- *   nothing aliased   -> aura crashes instantly (decal null pipeline)
- *   decals only       -> aura hangs the whole game
- *   all but _VEL      -> aura no longer bricks but everything crawls
- *                        (130 misses -> 130 stalled pipeline compiles), and
- *                        the screen corruption is STILL there
- *   everything        -> aura renders; corruption present
+ *   UUID strip (same namespace) -- collapses a mod's cloned material onto the
+ *     copy it was cloned from, inside the mod's OWN namespace. Proven good:
+ *     it is what stopped the Arch Traitor set freezing the UI, and the window
+ *     where it ran alone produced no corruption reports.
  *
- * The third run is what settles it. Skipping _VEL did not remove the RGB
- * streaks, so velocity was never their source, and each miss it created cost
- * an unbounded AddPipelineState wait instead. Corruption is a real and still
- * unexplained problem, but it is not one the miss/alias axis controls, and
- * trading it for hangs buys nothing. */
-static AliasMode s_mode = ALIAS_FULL;
+ *   Namespace rewrite (Public/<mod>/ -> Public/Shared/) -- repoints a mod
+ *     material at Larian's. Screen corruption appeared with it and tracked its
+ *     breadth through every narrowing attempted (by category, by render
+ *     variant); disabling substitution entirely made it stop.
+ *
+ * Name equality is not data-layout equality: the mod compiled its own shaders
+ * from its own copy of a material, and handing that material's parameter block
+ * to Larian's current Metal build of the same-named shader binds fine and then
+ * reads the wrong constants and texture slots. That is the corruption, and no
+ * amount of scoping fixes it -- the substitution itself is unsound.
+ *
+ * The cost is honest and localized: DemonHunter's effects have no Metal
+ * shaders at all, so they miss, and a decal miss still faults in
+ * ls::DecalObject::Render. A crash confined to one mod's effects beats
+ * corrupting every frame the game draws. */
+static AliasMode s_mode = ALIAS_UUID;
 
 
 /* Render variants never substituted. Comma-separated, BG3SE_SHADER_ALIAS_SKIP. */
@@ -137,7 +145,7 @@ static void alias_mode_init(void) {
     else if (strcmp(e, "decal") == 0) s_mode = ALIAS_DECAL;
     else if (strcmp(e, "full") == 0)  s_mode = ALIAS_FULL;
     else LOG_CORE_INFO("ShaderCloneShim: unknown BG3SE_SHADER_ALIAS='%s' "
-                       "(want off|uuid|decal|full); keeping decal", e);
+                       "(want off|uuid|decal|full); keeping uuid", e);
 }
 
 /* Cold path only. Kept out of fake_GetShader so the hot path -- every shader
