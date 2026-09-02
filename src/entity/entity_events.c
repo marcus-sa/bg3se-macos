@@ -19,6 +19,7 @@
 #include "component_typeid.h"
 #include "pending_subscriptions.h"
 #include "entity_system.h"
+#include "component_property.h"
 #include "component_lookup.h"
 #include "../lifetime/lifetime.h"
 #include "ecs_system_update.h"
@@ -657,7 +658,6 @@ static bool remove_signal_hook(uint16_t type_index) {
 static void call_lua_handler(lua_State *L, ComponentHook *hook,
                               uint64_t entity_handle, uint16_t type_index,
                               uint32_t event, void *component) {
-    (void)component;  // Reserved for future Signal integration (pass component data to Lua)
     if (!L || !hook->active || hook->lua_ref == LUA_NOREF) return;
 
     // Push the callback function
@@ -667,10 +667,17 @@ static void call_lua_handler(lua_State *L, ComponentHook *hook,
         return;
     }
 
-    // Push arguments: entity (as integer handle), component_type (as string), event_name
-    lua_pushinteger(L, (lua_Integer)entity_handle);
+    // (entity, componentType, component) -- the upstream signature. Windows
+    // calls the hook with std::tuple(EntityHandle, ExtComponentType,
+    // RawComponentRef) (EntityComponentEvents.inl, CallHandlerUnsafe), so mods
+    // are written as
+    //     function (entity, _, component) ... entity.Uuid.EntityUuid ...
+    // Arg 1 used to be a bare integer and arg 3 a "Create"/"Destroy" string,
+    // which made every such mod fail on its first line. It went unnoticed
+    // because OnCreate raised on unresolved component names, so these callbacks
+    // never ran.
+    entity_system_push_entity(L, entity_handle);
 
-    // Look up component name
     const ComponentInfo *info = component_registry_lookup_by_index(type_index);
     if (info) {
         lua_pushstring(L, info->name);
@@ -678,11 +685,19 @@ static void call_lua_handler(lua_State *L, ComponentHook *hook,
         lua_pushinteger(L, type_index);
     }
 
-    // Push event type string
-    if (event & ENTITY_EVENT_CREATE) {
-        lua_pushstring(L, "Create");
+    // The component itself. Every dispatch is deferred to the next tick --
+    // dispatch_event can fire from a ServerWorker thread and lua_pcall off the
+    // main thread corrupts the stack -- and DeferredEvent deliberately does not
+    // carry the component pointer, because it may be freed before the flush
+    // runs. So this is nil in practice today. Kept as a real branch rather than
+    // a hardcoded nil so that a future non-deferred path pushes the component
+    // instead of silently continuing to drop it; a proxy over a stale pointer
+    // would be far worse than nil.
+    const ComponentLayoutDef *layout = component_property_get_layout_by_index(type_index);
+    if (component && layout && (event & ENTITY_EVENT_CREATE)) {
+        component_property_push_proxy(L, component, layout);
     } else {
-        lua_pushstring(L, "Destroy");
+        lua_pushnil(L);
     }
 
     // Call with 3 arguments, 0 results

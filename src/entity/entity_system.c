@@ -1281,6 +1281,29 @@ static int lua_entity_get(lua_State *L) {
     return 1;
 }
 
+/* Push the same "BG3Entity" userdata Ext.Entity.Get returns.
+ *
+ * Component event callbacks receive this as their first argument. They used to
+ * get a bare integer handle, so every mod following the documented signature
+ * failed on the first line:
+ *
+ *     Ext.Entity.OnCreate("CombatantJoinEvent", function (entity, _, component)
+ *         local character = entity.Uuid.EntityUuid
+ *
+ *     Entity event callback failed: ...: attempt to index a number value
+ *                                        (local 'entity')
+ *
+ * It stayed invisible while OnCreate raised on unresolved component names and
+ * these callbacks never ran at all. */
+void entity_system_push_entity(lua_State *L, uint64_t handle) {
+    EntityUserdata *ud = (EntityUserdata *)lua_newuserdata(L, sizeof(EntityUserdata));
+    ud->handle = handle;
+    ud->lifetime = LIFETIME_INFINITE_HANDLE;  // entities never expire (upstream parity)
+
+    luaL_getmetatable(L, "BG3Entity");
+    lua_setmetatable(L, -2);
+}
+
 // Ext.Entity.GetWorld() -> true/false (for debugging)
 static int lua_entity_get_world(lua_State *L) {
     if (g_EntityWorld) {

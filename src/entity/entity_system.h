@@ -196,6 +196,10 @@ typedef struct {
     LifetimeHandle lifetime;
 } EntityUserdata;
 
+// Push the "BG3Entity" userdata Ext.Entity.Get returns, for callers that hand
+// an entity to Lua (component event callbacks).
+void entity_system_push_entity(lua_State *L, uint64_t handle);
+
 // ============================================================================
 // EntityWorld Interface
 // ============================================================================
