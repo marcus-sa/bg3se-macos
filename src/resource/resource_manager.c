@@ -541,6 +541,7 @@ void resource_dump_type(ResourceBankType type, int max_count) {
 // vanilla one. Whether they loaded is a fact we can read rather than infer.
 
 #include <stdlib.h>
+#include <stdio.h>
 
 void resource_probe_tick(void) {
     static int s_state = 0;        /* 0 = unstarted, 1 = probing, 2 = done */
@@ -556,12 +557,22 @@ void resource_probe_tick(void) {
     if (!resource_manager_ready()) return;
 
     /* Banks fill as the session loads; retry for a while before reporting. */
-    int visual = resource_get_count(RESOURCE_VISUAL);
-    int material = resource_get_count(RESOURCE_MATERIAL);
-    if (visual <= 0 && ++s_attempts < 600) return;
+    int any = 0;
+    for (int t = 0; t < RESOURCE_TYPE_COUNT; t++) {
+        if (resource_get_count((ResourceBankType)t) > 0) { any = 1; break; }
+    }
+    if (!any && ++s_attempts < 600) return;
 
-    log_message("[Resource] probe: Visual bank=%d, Material bank=%d "
-                "(after %d tick(s))", visual, material, s_attempts);
+    log_message("[Resource] probe: scanning all %d bank indices "
+                "(after %d tick(s))", RESOURCE_TYPE_COUNT, s_attempts);
+    for (int t = 0; t < RESOURCE_TYPE_COUNT; t++) {
+        int c = resource_get_count((ResourceBankType)t);
+        if (c > 0) {
+            log_message("[Resource]   bank[%2d] %-24s count=%d", t,
+                        s_resource_type_names[t] ? s_resource_type_names[t] : "?",
+                        c);
+        }
+    }
 
     char buf[1024];
     size_t n = strlen(s_list);
@@ -569,11 +580,26 @@ void resource_probe_tick(void) {
     memcpy(buf, s_list, n);
     buf[n] = '\0';
 
+    /* Ask EVERY bank, not the two we assume. This file already records that
+     * the positional index does not match this build everywhere, and that the
+     * only reliable way to place a resource is to look it up by UUID across
+     * all indices and see which one answers -- exactly what AnimationSet's
+     * correction was derived from. Assuming Visual=0 / Material=5 produced an
+     * inverted, meaningless first result. */
     for (char *tok = strtok(buf, ", "); tok; tok = strtok(NULL, ", ")) {
-        void *v = resource_get_by_name(RESOURCE_VISUAL, tok);
-        void *m = resource_get_by_name(RESOURCE_MATERIAL, tok);
-        log_message("[Resource] probe %s: Visual=%s Material=%s", tok,
-                    v ? "FOUND" : "missing", m ? "FOUND" : "missing");
+        char hits[256];
+        size_t o = 0;
+        hits[0] = '\0';
+        for (int t = 0; t < RESOURCE_TYPE_COUNT && o < sizeof(hits) - 32; t++) {
+            if (resource_get_by_name((ResourceBankType)t, tok)) {
+                o += (size_t)snprintf(hits + o, sizeof(hits) - o, "%s%d(%s)",
+                                      o ? "," : "", t,
+                                      s_resource_type_names[t] ?
+                                          s_resource_type_names[t] : "?");
+            }
+        }
+        log_message("[Resource] probe %s -> %s", tok,
+                    hits[0] ? hits : "NOT FOUND IN ANY BANK");
     }
     s_state = 2;
 }
