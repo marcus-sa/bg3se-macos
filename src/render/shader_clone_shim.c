@@ -12,13 +12,19 @@
  * unbounded pthread_yield loop — the "select a modded hair and the game
  * freezes at 300% CPU" hang (sampled live, twice, 8s apart, identical stack).
  *
- * Fix at the source: hook GetShader; on a miss where the name embeds a UUID
- * segment, retry with the segment stripped. The clone's shaders ARE the base
- * shaders (byte-identical recompiles — verified against the Windows
+ * Fix at the source: hook GetShader; on a miss, retry the base-shader names
+ * shader_alias.c derives from the requested one. The clone's shaders ARE the
+ * base shaders (byte-identical recompiles — verified against the Windows
  * Materials.pak), so aliasing is semantically exact. No pak edits needed.
+ *
+ * The same miss also has a second, deadlier outcome than the hang: an invalid
+ * ShaderID reaching the renderer as a null pipeline faults in
+ * ls::DecalObject::Render on the EmissiveRenderStage worker. See shader_alias.c
+ * for the two name shapes that miss and why rewriting them is exact.
  */
 
 #include "shader_clone_shim.h"
+#include "shader_alias.h"
 #include "../core/logging.h"
 #include "../strings/fixed_string.h"
 #include <dobby.h>
@@ -44,38 +50,6 @@ typedef uint64_t (*GetShaderFn)(void *mgr, const uint32_t *name_fs);
 static GetShaderFn s_orig = NULL;
 static bool s_installed = false;
 
-/* Strip one `_<8-4-4-4-12 hex uuid>` segment from a shader name.
- * Returns true and writes the shortened name when a segment was removed. */
-static bool strip_uuid_segment(const char *name, char *out, size_t out_size) {
-    static const int groups[] = {8, 4, 4, 4, 12};
-    size_t len = strlen(name);
-    for (size_t i = 0; i + 37 <= len; i++) {
-        if (name[i] != '_') continue;
-        size_t p = i + 1;
-        bool ok = true;
-        for (int g = 0; g < 5 && ok; g++) {
-            for (int k = 0; k < groups[g]; k++, p++) {
-                char c = name[p];
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-                      || (c >= 'A' && c <= 'F'))) { ok = false; break; }
-            }
-            if (ok && g < 4) {
-                if (name[p] != '-') { ok = false; }
-                p++;
-            }
-        }
-        if (!ok) continue;
-        // Segment must end the name or be followed by another underscore part.
-        if (name[p] != '\0' && name[p] != '_') continue;
-        size_t base_len = i + (len - p);
-        if (base_len + 1 > out_size) return false;
-        memcpy(out, name, i);
-        memcpy(out + i, name + p, len - p + 1);
-        return true;
-    }
-    return false;
-}
-
 static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
     uint64_t id = s_orig(mgr, name_fs);
     if (id != SHADERID_INVALID || !name_fs) {
@@ -91,27 +65,27 @@ static uint64_t fake_GetShader(void *mgr, const uint32_t *name_fs) {
 
     // Shader names arrive as full filesystem paths, not bare material names:
     // a Steam library path plus Public/<mod-uuid>/Assets/Materials/... reaches
-    // ~310 chars before the material name even starts. At 256 the strip below
-    // bailed on its length guard, the clone was logged as "no clone pattern",
-    // and the miss stood -- which is the unbounded AddPipelineState yield loop
-    // this shim exists to prevent. Sized for PATH_MAX; the guard still fails
-    // closed above it.
-    char base[PATH_MAX];
-    if (!strip_uuid_segment(name, base, sizeof(base))) {
-        // Genuine miss with no clone shape — log it: these are the shader
-        // names whose NullHandle IDs end up in pipeline descriptors.
-        LOG_CORE_INFO("ShaderCloneShim: MISS '%s' (no clone pattern)", name);
-        return id;
+    // ~310 chars before the material name even starts, so every buffer here is
+    // PATH_MAX and the helpers fail closed above it.
+    char cands[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
+    int n = shader_alias_candidates(name, cands);
+
+    for (int i = 0; i < n; i++) {
+        uint32_t base_fs = fixed_string_intern(cands[i], -1);
+        if (base_fs == FS_NULL_INDEX) continue;
+
+        uint64_t base_id = s_orig(mgr, &base_fs);
+        if (base_id != SHADERID_INVALID) {
+            LOG_CORE_INFO("ShaderCloneShim: '%s' -> '%s'", name, cands[i]);
+            return base_id;
+        }
     }
 
-    uint32_t base_fs = fixed_string_intern(base, -1);
-    if (base_fs == FS_NULL_INDEX) return id;
-
-    uint64_t base_id = s_orig(mgr, &base_fs);
-    if (base_id != SHADERID_INVALID) {
-        LOG_CORE_INFO("ShaderCloneShim: '%s' -> '%s'", name, base);
-        return base_id;
-    }
+    // Genuine miss: no base shader exists under any alias. These are the names
+    // whose invalid IDs end up in pipeline descriptors — log them, because a
+    // null pipeline is a renderer crash, not a dropped draw.
+    LOG_CORE_INFO("ShaderCloneShim: MISS '%s' (%d alias candidate(s) tried)",
+                  name, n);
     return id;
 }
 

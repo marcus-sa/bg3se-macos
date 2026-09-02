@@ -50,3 +50,4 @@ __pycache__/
 
 # Compat run reports (committed evidence lives in docs/compat-reports/baseline/)
 .reports/
+.serena/

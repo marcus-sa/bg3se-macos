@@ -216,6 +216,7 @@ add_library(bg3se SHARED
     src/game/video_skip.c
     src/game/vt_unload_guard.c
     src/render/shader_clone_shim.c
+    src/render/shader_alias.c
     src/render/pipeline_probe.c
     src/render/pipeline_wait_guard.c
     src/game/focus_hack.c
@@ -406,6 +407,7 @@ if(BUILD_TESTS)
         tests/tier0/test_pending_subscriptions.c
         tests/tier0/test_component_offsets_spells.c
         tests/tier0/test_server_object_layout.c
+        tests/tier0/test_shader_alias.c
         tests/tier0/stub_logging.c
         src/core/safe_memory.c
         src/entity/guid_lookup.c
@@ -413,6 +415,7 @@ if(BUILD_TESTS)
         src/entity/component_name_resolve.c
         src/entity/pending_subscriptions.c
         src/osiris/pattern_scan.c
+        src/render/shader_alias.c
         src/mod/mod_paths.c
         src/lua/lua_runtime.c
         src/lua/lua_context.c
@@ -438,6 +441,7 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/stats
         ${CMAKE_SOURCE_DIR}/src/enum
         ${CMAKE_SOURCE_DIR}/src/staticdata
+        ${CMAKE_SOURCE_DIR}/src/render
         ${LUA_SRC_DIR}
     )
     target_link_libraries(bg3se_test_tier0 PRIVATE lua_static "-framework Foundation")
