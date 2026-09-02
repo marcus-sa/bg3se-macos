@@ -15,6 +15,8 @@ void register_osiris_handle_tests(void);
 void register_osiris_db_type_tests(void);
 void register_entity_events_tests(void);
 void register_mod_paths_tests(void);
+void register_mod_env_tests(void);
+void register_staticdata_registry_tests(void);
 void register_lua_runtime_tests(void);
 void register_guid_lookup_tests(void);
 void register_user_variables_tests(void);
@@ -31,6 +33,8 @@ int main(void) {
     register_osiris_db_type_tests();
     register_entity_events_tests();
     register_mod_paths_tests();
+    register_mod_env_tests();
+    register_staticdata_registry_tests();
     register_lua_runtime_tests();
     register_guid_lookup_tests();
     register_user_variables_tests();

@@ -173,6 +173,74 @@ TEST(meta_declares_fails_closed) {
     ASSERT_FALSE(mod_meta_declares("<save><node id=\"root\"/></save>", "BG3MCM"));
 }
 
+
+// ---------------------------------------------------------------------------
+// mod_meta_publish_version — Ext.Mod.GetMod().Info.PublishVersion
+//
+// modsettings.lsx has no PublishVersion, so it has to come from meta.lsx.
+// SpellListCombiner/Utils.lua:73 concats it for every mod in the load order,
+// so a nil there aborted its BootstrapClient every session.
+// ---------------------------------------------------------------------------
+
+// Real shape: PublishVersion sits alongside Version64 in ModuleInfo, and the
+// Dependencies node carries its own PublishVersion for a different mod.
+static const char *META_WITH_PUBLISH =
+    "<save><region id=\"Config\"><node id=\"root\"><children>\n"
+    "  <node id=\"Dependencies\"><children>\n"
+    "    <node id=\"ModuleShortDesc\">\n"
+    "      <attribute id=\"Folder\" type=\"LSString\" value=\"BG3MCM\" />\n"
+    "      <attribute id=\"PublishVersion\" type=\"int64\" value=\"999\" />\n"
+    "    </node>\n"
+    "  </children></node>\n"
+    "  <node id=\"ModuleInfo\">\n"
+    "    <attribute id=\"Folder\" type=\"LSString\" value=\"SpellListCombiner\" />\n"
+    "    <attribute id=\"PublishVersion\" type=\"int64\" value=\"36028799166447616\" />\n"
+    "    <attribute id=\"Version64\" type=\"int64\" value=\"36029397535326208\" />\n"
+    "  </node>\n"
+    "</children></node></region></save>\n";
+
+TEST(publish_version_reads_module_info) {
+    uint64_t v = 0;
+    ASSERT_TRUE(mod_meta_publish_version(META_WITH_PUBLISH, &v));
+    ASSERT_EQ(v, 36028799166447616ULL);
+    // Decoded the way push_version_table does: 1.0.1.0.
+    ASSERT_EQ((int)((v >> 55) & 0x7f), 1);
+    ASSERT_EQ((int)((v >> 47) & 0xff), 0);
+    ASSERT_EQ((int)((v >> 31) & 0xffff), 1);
+    ASSERT_EQ((int)(v & 0x7fffffff), 0);
+}
+
+TEST(publish_version_ignores_dependencies) {
+    // The dependency's PublishVersion appears FIRST in the document; a
+    // whole-document search would return 999 here.
+    uint64_t v = 0;
+    ASSERT_TRUE(mod_meta_publish_version(META_WITH_PUBLISH, &v));
+    ASSERT_NE(v, 999ULL);
+}
+
+TEST(publish_version_absent_leaves_out_untouched) {
+    uint64_t v = 0x5a5a;
+    ASSERT_FALSE(mod_meta_publish_version(META_MCM, &v));
+    ASSERT_EQ(v, 0x5a5aULL);
+}
+
+TEST(publish_version_fails_closed) {
+    uint64_t v = 0;
+    ASSERT_FALSE(mod_meta_publish_version(NULL, &v));
+    ASSERT_FALSE(mod_meta_publish_version(META_WITH_PUBLISH, NULL));
+    ASSERT_FALSE(mod_meta_publish_version("<save><node id=\"root\"/></save>", &v));
+}
+
+TEST(publish_version_rejects_non_numeric) {
+    // A malformed value must not decode as 0 and pass for a real version.
+    static const char *bad =
+        "<node id=\"ModuleInfo\">"
+        "<attribute id=\"PublishVersion\" type=\"int64\" value=\"1.0.1.0\" />"
+        "</node>";
+    uint64_t v = 0;
+    ASSERT_FALSE(mod_meta_publish_version(bad, &v));
+}
+
 void register_mod_paths_tests(void) {
     printf("mod_paths:\n");
     RUN_TEST(pak_stem_basic);
@@ -194,6 +262,11 @@ void register_mod_paths_tests(void) {
     RUN_TEST(meta_declares_ignores_dependencies);
     RUN_TEST(meta_declares_rejects_unrelated_mod);
     RUN_TEST(meta_declares_requires_exact_value);
+    RUN_TEST(publish_version_reads_module_info);
+    RUN_TEST(publish_version_ignores_dependencies);
+    RUN_TEST(publish_version_absent_leaves_out_untouched);
+    RUN_TEST(publish_version_fails_closed);
+    RUN_TEST(publish_version_rejects_non_numeric);
     RUN_TEST(meta_declares_ignores_other_attributes);
     RUN_TEST(meta_declares_fails_closed);
 }

@@ -7,6 +7,7 @@
 #include "lua_ext.h"
 #include "lua_context.h"
 #include "lua_ide_helpers.h"
+#include "lua_events.h"
 #include "version.h"
 #include "logging.h"
 #include "../console/console.h"
@@ -497,6 +498,94 @@ int lua_ext_memory_getmodulebase(lua_State *L) {
 // Registration
 // ============================================================================
 
+// ============================================================================
+// Ext._Internal (Windows BG3SE compatibility surface)
+// ----------------------------------------------------------------------------
+// Windows ships a Lua-side bootstrap that creates Ext._Internal and hangs its
+// EventManager off it, so mods reach registries the C++ side owns through
+// Ext._Internal.* . This port has no Lua bootstrap layer, so the table has to
+// be built in C. Only the members installed mods actually read are provided --
+// anything else would be a shape with nothing behind it:
+//
+//   Ext._Internal._ConsoleCommandListeners
+//       SpellListCombiner/ConsoleCommands.lua:5 assigns it to `cmdListeners`
+//       and then checks `cmdListeners[cmd]` after each Ext.RegisterConsoleCommand
+//       to decide whether the command took. Indexing nil there aborted the file,
+//       which took registerConsoleCommands() with it and then Shared.lua:82.
+//   Ext._Internal.EventManager.ConsoleCommandListeners
+//       Current Windows spelling of the same registry
+//       (LuaScripts/Libs/Events/EventManager.lua:17).
+//   Ext._Internal.EventManager.NetListeners
+//       MCM/Shared/Helpers/Events/ModEventManager.lua:167 iterates it per channel.
+//
+// The console listener table is filled by the RegisterConsoleCommand wrapper
+// below rather than mirrored after the fact, so it records exactly the
+// registrations the console dispatcher was handed.
+#define BG3SE_CONSOLE_LISTENERS_KEY "BG3SE_ConsoleCommandListeners"
+
+static void push_console_command_listeners(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, BG3SE_CONSOLE_LISTENERS_KEY);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, BG3SE_CONSOLE_LISTENERS_KEY);
+    }
+}
+
+/*
+ * Ext.RegisterConsoleCommand(name, fn) - records the callback in the
+ * Lua-visible listener table, then hands it to the console dispatcher.
+ *
+ * The order matters only for failure reporting: console_register_command
+ * refuses silently once its table is full (it warns and returns rather than
+ * raising, so one console command cannot cost a whole mod), and it exposes no
+ * way to ask whether a registration took. A mod checking
+ * _ConsoleCommandListeners[cmd] therefore sees a command that will not
+ * dispatch in that overflow case; the alternative -- no table at all -- breaks
+ * the mod outright, which is what was happening.
+ */
+static int lua_ext_register_console_command(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    push_console_command_listeners(L);      // [name, fn, listeners]
+    lua_getfield(L, -1, name);              // [.., listeners, list?]
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -3, name);          // listeners[name] = list
+    }
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, (lua_Integer)lua_rawlen(L, -2) + 1);
+    lua_pop(L, 2);                          // [name, fn]
+
+    return console_register_command(L);
+}
+
+void lua_ext_register_internal(lua_State *L, int ext_table_index) {
+    if (ext_table_index < 0) {
+        ext_table_index = lua_gettop(L) + ext_table_index + 1;
+    }
+
+    lua_newtable(L);                                   // _Internal
+
+    push_console_command_listeners(L);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -3, "_ConsoleCommandListeners");   // [_Internal, listeners]
+
+    lua_newtable(L);                                   // [_Internal, listeners, EM]
+    lua_pushvalue(L, -2);
+    lua_setfield(L, -2, "ConsoleCommandListeners");
+    events_push_net_listener_registry(L);
+    lua_setfield(L, -2, "NetListeners");
+    lua_setfield(L, -3, "EventManager");               // [_Internal, listeners]
+    lua_pop(L, 1);                                     // [_Internal]
+
+    lua_setfield(L, ext_table_index, "_Internal");
+}
+
 void lua_ext_register_basic(lua_State *L, int ext_table_index) {
     // Convert negative index to absolute since we'll be pushing onto stack
     if (ext_table_index < 0) {
@@ -518,8 +607,10 @@ void lua_ext_register_basic(lua_State *L, int ext_table_index) {
     lua_pushcfunction(L, lua_ext_getcontext);
     lua_setfield(L, ext_table_index, "GetContext");
 
-    lua_pushcfunction(L, console_register_command);
+    lua_pushcfunction(L, lua_ext_register_console_command);
     lua_setfield(L, ext_table_index, "RegisterConsoleCommand");
+
+    lua_ext_register_internal(L, ext_table_index);
 }
 
 void lua_ext_register_io(lua_State *L, int ext_table_index) {
@@ -1666,6 +1757,22 @@ void lua_ext_register_global_helpers(lua_State *L) {
         "BG3SE_AddTest(1, 'Core.RegisterConsoleCommand', function()\n"
         "  AssertType(Ext.RegisterConsoleCommand, 'function', 'RegisterConsoleCommand')\n"
         "  Ext.RegisterConsoleCommand('bg3se_test_noop', function() end)\n"
+        "end)\n"
+        // SpellListCombiner reads _ConsoleCommandListeners[cmd] to decide whether
+        // its registration took; a nil _Internal aborted three of its files.
+        "BG3SE_AddTest(1, 'Core._Internal', function()\n"
+        "  AssertType(Ext._Internal, 'table', '_Internal')\n"
+        "  AssertType(Ext._Internal._ConsoleCommandListeners, 'table', "
+        "'_ConsoleCommandListeners')\n"
+        "  AssertType(Ext._Internal.EventManager, 'table', 'EventManager')\n"
+        "  AssertType(Ext._Internal.EventManager.NetListeners, 'table', "
+        "'NetListeners')\n"
+        "  assert(Ext._Internal.EventManager.ConsoleCommandListeners == "
+        "Ext._Internal._ConsoleCommandListeners, 'listener aliases differ')\n"
+        "  Ext.RegisterConsoleCommand('bg3se_test_internal', function() end)\n"
+        "  local l = Ext._Internal._ConsoleCommandListeners['bg3se_test_internal']\n"
+        "  assert(type(l) == 'table' and type(l[1]) == 'function',\n"
+        "    'RegisterConsoleCommand did not reach _ConsoleCommandListeners')\n"
         "end)\n"
         "BG3SE_AddTest(1, 'Json.Parse', function()\n"
         "  local t = Ext.Json.Parse('{\"a\":1,\"b\":\"hello\"}')\n"

@@ -8,6 +8,7 @@
 
 #include "lua_mod.h"
 #include "../mod/mod_loader.h"
+#include "../mod/mod_paths.h"
 #include "../core/logging.h"
 
 #include <lauxlib.h>
@@ -33,6 +34,8 @@ typedef struct {
     char name[256];
     char folder[256];       // meta Folder (== pak internal dir); Directory for Info
     char version64[32];     // packed int64 version string, decoded into Info.ModVersion
+    uint64_t publish64;     // meta.lsx PublishVersion, decoded into Info.PublishVersion
+    bool publish_resolved;  // meta.lsx already consulted (hit or miss) for this mod
 } ModUuidEntry;
 
 static ModUuidEntry g_mod_uuids[MAX_MOD_UUIDS];
@@ -270,7 +273,79 @@ static int lua_mod_get_load_order(lua_State *L) {
  * CompatibilityFramework) read mod.Info.ModVersion / .Directory / .ModuleUUID;
  * a missing Info table aborted their bootstraps.
  */
-static void push_mod_table(lua_State *L, const ModUuidEntry *e) {
+/*
+ * Resolve a mod's PublishVersion out of its meta.lsx, once per mod.
+ *
+ * modsettings.lsx (the list load_mod_uuids parses) carries Version64 but never
+ * PublishVersion, so it has to come from the mod's own meta.lsx -- on disk for
+ * an extracted mod, otherwise out of its PAK. Both are miss-tolerant: mods
+ * installed without a meta.lsx we can reach keep publish64 == 0, which is the
+ * value an unpublished local mod has anyway.
+ */
+static void resolve_publish_version(ModUuidEntry *e) {
+    if (e->publish_resolved) return;
+    e->publish_resolved = true;
+
+    const char *dir = e->folder[0] ? e->folder : e->name;
+    const char *home = getenv("HOME");
+    char *xml = NULL;
+
+    if (home) {
+        char path[1024];
+        snprintf(path, sizeof(path),
+                 "%s/Documents/Larian Studios/Baldur's Gate 3/Mods/%s/meta.lsx",
+                 home, dir);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (size > 0 && size < 4 * 1024 * 1024) {
+                xml = (char *)malloc((size_t)size + 1);
+                if (xml) {
+                    size_t got = fread(xml, 1, (size_t)size, f);
+                    xml[got] = '\0';
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (!xml) xml = mod_pak_get_meta_lsx(dir);
+    if (!xml) return;
+
+    uint64_t v = 0;
+    if (mod_meta_publish_version(xml, &v)) {
+        e->publish64 = v;
+    }
+    free(xml);
+}
+
+/*
+ * Push a Version table in the shape mods read: array [1..4] plus named fields.
+ * Packed int64 layout (Norbyte): Major:7 (>>55) Minor:8 (>>47)
+ * Revision:16 (>>31) Build:31 (low).
+ */
+static void push_version_table(lua_State *L, uint64_t packed) {
+    lua_Integer major    = (lua_Integer)((packed >> 55) & 0x7f);
+    lua_Integer minor    = (lua_Integer)((packed >> 47) & 0xff);
+    lua_Integer revision = (lua_Integer)((packed >> 31) & 0xffff);
+    lua_Integer build    = (lua_Integer)(packed & 0x7fffffff);
+
+    lua_newtable(L);
+    lua_pushinteger(L, major);    lua_rawseti(L, -2, 1);
+    lua_pushinteger(L, minor);    lua_rawseti(L, -2, 2);
+    lua_pushinteger(L, revision); lua_rawseti(L, -2, 3);
+    lua_pushinteger(L, build);    lua_rawseti(L, -2, 4);
+    lua_pushinteger(L, major);    lua_setfield(L, -2, "Major");
+    lua_pushinteger(L, minor);    lua_setfield(L, -2, "Minor");
+    lua_pushinteger(L, revision); lua_setfield(L, -2, "Revision");
+    lua_pushinteger(L, build);    lua_setfield(L, -2, "Build");
+}
+
+static void push_mod_table(lua_State *L, ModUuidEntry *e) {
+    resolve_publish_version(e);
+
     const char *dir = e->folder[0] ? e->folder : e->name;
 
     lua_newtable(L);  // mod
@@ -299,28 +374,22 @@ static void push_mod_table(lua_State *L, const ModUuidEntry *e) {
     lua_pushstring(L, "");       lua_setfield(L, -2, "Author");
     lua_pushstring(L, "");       lua_setfield(L, -2, "Description");
 
-    // ModVersion, decoded from the packed int64 (Norbyte layout):
-    // Major:7 (>>55) Minor:8 (>>47) Revision:16 (>>31) Build:31 (low).
-    uint64_t v = e->version64[0] ? strtoull(e->version64, NULL, 10) : 0;
-    lua_Integer major = (lua_Integer)((v >> 55) & 0x7f);
-    lua_Integer minor = (lua_Integer)((v >> 47) & 0xff);
-    lua_Integer revision = (lua_Integer)((v >> 31) & 0xffff);
-    lua_Integer build = (lua_Integer)(v & 0x7fffffff);
-    lua_newtable(L);  // ModVersion
-    // Array form ModVersion[1..4] — this is what mods (MCM, CommunityLibrary)
-    // actually read (e.g. string.format("%d.%d.%d.%d", ModVersion[1], ...)).
-    // A missing [1] made string.format throw and aborted MCM's CreateModMenu,
-    // which is why UIReady never fired (window auto-opened, content stayed empty).
-    lua_pushinteger(L, major);    lua_rawseti(L, -2, 1);
-    lua_pushinteger(L, minor);    lua_rawseti(L, -2, 2);
-    lua_pushinteger(L, revision); lua_rawseti(L, -2, 3);
-    lua_pushinteger(L, build);    lua_rawseti(L, -2, 4);
-    // Named fields too, for consumers that use them.
-    lua_pushinteger(L, major);    lua_setfield(L, -2, "Major");
-    lua_pushinteger(L, minor);    lua_setfield(L, -2, "Minor");
-    lua_pushinteger(L, revision); lua_setfield(L, -2, "Revision");
-    lua_pushinteger(L, build);    lua_setfield(L, -2, "Build");
+    // ModVersion, decoded from the packed int64 in modsettings.lsx. The array
+    // form ModVersion[1..4] is what mods (MCM, CommunityLibrary) actually read
+    // (e.g. string.format("%d.%d.%d.%d", ModVersion[1], ...)). A missing [1]
+    // made string.format throw and aborted MCM's CreateModMenu, which is why
+    // UIReady never fired (window auto-opened, content stayed empty).
+    push_version_table(L, e->version64[0] ? strtoull(e->version64, NULL, 10) : 0);
     lua_setfield(L, -2, "ModVersion");
+
+    // PublishVersion, from the mod's meta.lsx. Windows always hands back a
+    // Version here, never nil, and mods concat it unguarded --
+    // SpellListCombiner/Utils.lua:73 does table.concat(modInfo.PublishVersion,
+    // ".") for every mod in the load order, so a nil aborted its whole client
+    // bootstrap. Zero when the meta.lsx is unreachable, which is also the real
+    // value for a mod that was never published.
+    push_version_table(L, e->publish64);
+    lua_setfield(L, -2, "PublishVersion");
 
     lua_newtable(L);  lua_setfield(L, -2, "Dependencies");
 

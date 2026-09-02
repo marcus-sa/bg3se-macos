@@ -13,6 +13,7 @@
 #define BG3SE_MOD_PATHS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +46,22 @@ int mod_entry_se_config_dir(const char *entry_name, char *dir_out, size_t dir_si
  * @return 1 if ModuleInfo declares this mod, 0 otherwise
  */
 int mod_meta_declares(const char *meta_xml, const char *mod_name);
+
+/**
+ * Read the ModuleInfo node's PublishVersion attribute (the packed int64 mod.io
+ * publish version) out of a meta.lsx.
+ *
+ * modsettings.lsx -- the only mod list this port parses eagerly -- carries
+ * Version64 but not PublishVersion, so Ext.Mod.GetMod().Info.PublishVersion was
+ * nil. SpellListCombiner/Utils.lua:73 does table.concat(modInfo.PublishVersion,
+ * ".") for every mod in the load order, so that nil aborted its BootstrapClient.
+ *
+ * Only the ModuleInfo node is consulted, for the same reason as
+ * mod_meta_declares: Dependencies lists other mods with identical markup.
+ *
+ * @return 1 if a well-formed value was found and written to *out, 0 otherwise
+ */
+int mod_meta_publish_version(const char *meta_xml, uint64_t *out);
 
 #ifdef __cplusplus
 }

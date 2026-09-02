@@ -112,6 +112,12 @@ int mod_pak_find_se_dir(const char *pak_path, const char *mod_name,
 char *mod_pak_get_config_json(const char *dir_name);
 
 /**
+ * Read Mods/<dir_name>/meta.lsx out of that mod's PAK.
+ * @return malloc'd NUL-terminated XML the caller frees, or NULL
+ */
+char *mod_pak_get_meta_lsx(const char *dir_name);
+
+/**
  * Find the PAK file containing a mod in the Mods folder.
  * @return 1 if found and pak_path_out set, 0 if not found
  */

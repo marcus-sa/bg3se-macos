@@ -268,6 +268,27 @@ char *mod_pak_get_config_json(const char *dir_name) {
     return content;
 }
 
+char *mod_pak_get_meta_lsx(const char *dir_name) {
+    char pak_path[MAX_PATH_LEN];
+    if (!mod_find_pak(dir_name, pak_path, sizeof(pak_path))) return NULL;
+
+    PakFile *pak = pak_open(pak_path);
+    if (!pak) return NULL;
+
+    char meta_path[512];
+    snprintf(meta_path, sizeof(meta_path), "Mods/%s/meta.lsx", dir_name);
+
+    int entry_idx = pak_find_entry(pak, meta_path);
+    if (entry_idx < 0) {
+        pak_close(pak);
+        return NULL;
+    }
+
+    char *content = pak_read_file(pak, entry_idx, NULL);
+    pak_close(pak);
+    return content;
+}
+
 int mod_find_pak(const char *mod_name, char *pak_path_out, size_t pak_path_size) {
     const char *home = getenv("HOME");
     if (!home) return 0;

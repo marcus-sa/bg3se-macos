@@ -159,6 +159,7 @@ add_library(bg3se SHARED
     src/lua/lua_ide_helpers.c
     src/lua/lua_json.c
     src/lua/lua_context.c
+    src/lua/lua_modenv.c
     src/lua/lua_osiris.c
     src/lua/lua_stats.c
     src/lua/lua_debug.c
@@ -231,6 +232,7 @@ add_library(bg3se SHARED
     src/staticdata/staticdata_manager.c
     src/staticdata/staticdata_registry.c
     src/staticdata/generated_staticdata_registry.c
+    src/staticdata/generated_staticdata_vtables.c
     src/staticdata/staticdata_fields.c
     src/staticdata/generated_resource_fields.c
     src/lua/lua_staticdata.c
@@ -386,6 +388,8 @@ if(BUILD_TESTS)
         tests/tier0/test_osiris_db_types.c
         tests/tier0/test_entity_events.c
         tests/tier0/test_mod_paths.c
+        tests/tier0/test_mod_env.c
+        tests/tier0/test_staticdata_registry.c
         tests/tier0/test_lua_runtime.c
         tests/tier0/test_guid_lookup.c
         tests/tier0/test_user_variables.c
@@ -399,6 +403,9 @@ if(BUILD_TESTS)
         src/mod/mod_paths.c
         src/lua/lua_runtime.c
         src/lua/lua_context.c
+        src/lua/lua_modenv.c
+        src/staticdata/generated_staticdata_registry.c
+        src/staticdata/generated_staticdata_vtables.c
         src/lua/lua_json.c
         src/vars/user_variables.c
         src/vars/vars_persist.c
@@ -415,6 +422,7 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/vars
         ${CMAKE_SOURCE_DIR}/src/stats
         ${CMAKE_SOURCE_DIR}/src/enum
+        ${CMAKE_SOURCE_DIR}/src/staticdata
         ${LUA_SRC_DIR}
     )
     target_link_libraries(bg3se_test_tier0 PRIVATE lua_static "-framework Foundation")

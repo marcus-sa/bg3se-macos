@@ -330,6 +330,16 @@ void events_fire_net_mod_message(lua_State *L, const char *channel, const char *
  * @param channel      Channel name to listen on
  * @param callback_ref Lua registry reference to the callback function
  */
+/**
+ * Push the live net-listener registry: { [channel] = { fn, fn, ... } }.
+ *
+ * This is the table events_fire_net_listeners actually dispatches from, not
+ * a copy. Ext._Internal.EventManager.NetListeners exposes it because MCM
+ * reads it directly (ModEventManager.lua:167 iterates
+ * Ext._Internal.EventManager.NetListeners[channel]).
+ */
+void events_push_net_listener_registry(lua_State *L);
+
 void events_register_net_listener(lua_State *L, const char *channel, int callback_ref);
 
 /**

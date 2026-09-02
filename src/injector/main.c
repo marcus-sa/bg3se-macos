@@ -70,6 +70,7 @@ extern "C" {
 #include "lua_ext.h"
 #include "lua_gate.h"
 #include "lua_context.h"
+#include "lua_modenv.h"
 #include "lua_runtime.h"
 #include "lua_json.h"
 #include "lua_osiris.h"
@@ -700,6 +701,11 @@ static void setup_mod_namespace(lua_State *L, const char *mod_table, const char 
 // each freshly loaded mod chunk via mod_env_apply() before the chunk runs.
 static int g_mod_env_ref = LUA_NOREF;
 
+// Second-context shadow environments live in src/lua/lua_modenv.c: the client
+// and server halves of a mod share one Lua state here, so the second half to
+// bootstrap runs layered over the first's Mods.<ModTable> instead of
+// overwriting it. See lua_modenv.h for the failure that motivated it.
+
 // Make Mods.<mod_table> the active per-mod _ENV for subsequently loaded chunks.
 // Ensures the table exists, carries an { __index = _G } metatable, and has its
 // ModuleUUID seeded mod-locally. Pass mod_table == NULL to clear.
@@ -758,6 +764,27 @@ static void mod_env_set(lua_State *L, const char *mod_table, const char *uuid) {
     // Verified live: with E._G = E, CommunityLibrary.Import() returns its tables.
     lua_pushvalue(L, -1);                     // [Mods, E, E]
     lua_setfield(L, -2, "_G");                // E._G = E ; [Mods, E]
+
+    // The first context to bootstrap this mod owns the published table; every
+    // later context gets a shadow layered on top so its bootstrap's top-level
+    // `Foo = {}` cannot wipe what the first context built. See lua_modenv.h.
+    int ctx = (int)lua_context_get();
+    if (ctx != (int)LUA_CONTEXT_NONE &&
+        !lua_modenv_claim_owner(L, mod_table, ctx)) {
+        lua_modenv_push_shadow(L, -1, ctx, mod_table);   // [Mods, E, S]
+        // ModuleUUID is seeded on the shadow too: the published table already
+        // has it, but a shadow write would otherwise be captured privately.
+        if (uuid && uuid[0]) {
+            lua_pushstring(L, uuid);
+            lua_setfield(L, -2, "ModuleUUID");
+        }
+        g_mod_env_ref = luaL_ref(L, LUA_REGISTRYINDEX);  // pops S ; [Mods, E]
+        lua_pop(L, 2);                            // [] pop E, Mods
+        LOG_LUA_DEBUG("Mods.%s: %s bootstrap runs in a shadow env (published "
+                      "table owned by the other context)",
+                      mod_table, lua_context_get_name((LuaContext)ctx));
+        return;
+    }
 
     lua_pushvalue(L, -1);                     // [Mods, E, E]
     g_mod_env_ref = luaL_ref(L, LUA_REGISTRYINDEX);  // pops E ; [Mods, E]

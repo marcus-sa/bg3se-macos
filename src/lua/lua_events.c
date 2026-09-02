@@ -2138,17 +2138,20 @@ void events_fire_net_message(lua_State *L, const char *channel, const char *payl
 // Layout: g_net_listener_registry_ref -> { [channel] = { callback1, callback2, ... } }
 static int g_net_listener_registry_ref = LUA_NOREF;
 
+void events_push_net_listener_registry(lua_State *L) {
+    if (g_net_listener_registry_ref == LUA_NOREF) {
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        g_net_listener_registry_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        return;
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, g_net_listener_registry_ref);
+}
+
 void events_register_net_listener(lua_State *L, const char *channel, int callback_ref) {
     if (!L || !channel) return;
 
-    // Initialize registry table on first use
-    if (g_net_listener_registry_ref == LUA_NOREF) {
-        lua_newtable(L);
-        g_net_listener_registry_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    }
-
-    // Get the registry table
-    lua_rawgeti(L, LUA_REGISTRYINDEX, g_net_listener_registry_ref);
+    events_push_net_listener_registry(L);
 
     // Get or create the channel's listener array
     lua_getfield(L, -1, channel);

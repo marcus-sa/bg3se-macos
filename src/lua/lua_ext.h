@@ -86,6 +86,13 @@ int lua_ext_io_getpathoverride(lua_State *L);
 void lua_ext_register_basic(lua_State *L, int ext_table_index);
 
 /**
+ * Register Ext._Internal -- the Windows compatibility surface mods reach the
+ * console-command and net-listener registries through. Called from
+ * lua_ext_register_basic; see lua_ext.c for which members exist and why.
+ */
+void lua_ext_register_internal(lua_State *L, int ext_table_index);
+
+/**
  * Register Ext.IO namespace functions
  * @param L Lua state
  * @param ext_table_index Stack index of Ext table

@@ -27,6 +27,45 @@ typedef struct {
 extern const StaticDataTypeEntry g_staticdata_types[];
 extern const int g_staticdata_type_count;
 
+/*
+ * Per-type vtable offsets, keyed by engine class.
+ *
+ * m_TypeIndex is a guarded function-local static that ships as 0 with a zero
+ * guard variable, so a type the game has not resolved yet reads back index 0 --
+ * a valid index belonging to some other type. An index-only lookup therefore
+ * returns the WRONG bank silently. Matching the bank's vptr against the type's
+ * own vtable (offset + 0x10, the Itanium address point) is what makes the answer
+ * trustworthy. Terminated by a NULL name.
+ */
+typedef struct {
+    const char *engine_class;
+    uint64_t vtable_offset;    // offset of __ZTV<class> from the image base
+} StaticDataVtableEntry;
+
+extern const StaticDataVtableEntry g_staticdata_vtables[];
+extern const int g_staticdata_vtable_count;
+
+/*
+ * Why a manager lookup failed, so callers can say something specific instead of
+ * returning a bare nil. Ext.StaticData.Get returned nil with no log at all for
+ * Progression/ClassDescription/PassiveList/EquipmentList, and the Expansion mod
+ * dereferenced it (EXP_Lib.lua:40) on every StatsLoaded.
+ */
+typedef enum {
+    STATICDATA_MGR_OK = 0,
+    STATICDATA_MGR_NO_HEADMASTER,   // headmaster singleton not up yet
+    STATICDATA_MGR_NO_TYPE_INDEX,   // m_TypeIndex never initialised for this type
+    STATICDATA_MGR_NOT_REGISTERED,  // headmaster has no bank of this type
+    STATICDATA_MGR_UNREADABLE       // headmaster map could not be walked
+} StaticDataManagerStatus;
+
+/** Human-readable form of a StaticDataManagerStatus, for log lines. */
+const char *staticdata_registry_status_name(StaticDataManagerStatus st);
+
+/** As staticdata_registry_get_manager, but reports why it failed. */
+void *staticdata_registry_get_manager_ex(const StaticDataTypeEntry *entry,
+                                         StaticDataManagerStatus *out_status);
+
 /** Record the main binary base; the table's offsets are image-relative. */
 void staticdata_registry_init(void *main_binary_base);
 

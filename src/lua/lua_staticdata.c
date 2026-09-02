@@ -218,6 +218,54 @@ static int lua_staticdata_create(lua_State *L) {
  * @param type Type name string
  * @return Entry table, or nil if not found
  */
+/*
+ * Explain a nil from Ext.StaticData.Get once per (type, reason).
+ *
+ * Rate-limited by type: Expansion alone calls Get 167 times per StatsLoaded, so
+ * an unconditional line would bury the log. One line per type per reason is
+ * enough to say which types this build cannot resolve.
+ */
+static void staticdata_log_miss(const StaticDataTypeEntry *entry,
+                                const char *type_name, const char *guid_str,
+                                bool manager_seen, StaticDataManagerStatus st) {
+    if (!entry) {
+        LOG_CORE_WARN("[StaticData] Get('%s', '%s') -> nil: type is not in the "
+                      "generic registry and has no hooked manager",
+                      guid_str ? guid_str : "(null)",
+                      type_name ? type_name : "(null)");
+        return;
+    }
+
+    // 128 covers the 105 registered types with room for the legacy-only ones.
+    static const char *warned_type[128];
+    static int warned_reason[128];
+    static int warned_count = 0;
+
+    int reason = manager_seen ? (int)st : -1;
+    for (int i = 0; i < warned_count; i++) {
+        if (warned_type[i] == entry->name && warned_reason[i] == reason) return;
+    }
+    if (warned_count < (int)(sizeof(warned_type) / sizeof(warned_type[0]))) {
+        warned_type[warned_count] = entry->name;
+        warned_reason[warned_count] = reason;
+        warned_count++;
+    }
+
+    if (manager_seen && st != STATICDATA_MGR_OK) {
+        LOG_CORE_WARN("[StaticData] '%s' (%s) cannot be resolved on this build: %s. "
+                      "Get('%s', '%s') and every other lookup of this type "
+                      "returns nil.",
+                      entry->name, entry->engine_class,
+                      staticdata_registry_status_name(st),
+                      guid_str ? guid_str : "(null)", entry->name);
+    } else {
+        LOG_CORE_WARN("[StaticData] '%s' (%s) resolved its manager, but GUID %s "
+                      "is not in the bank.",
+                      entry->name, entry->engine_class,
+                      guid_str ? guid_str : "(null)");
+    }
+}
+
 static int lua_staticdata_get(lua_State *L) {
     const char* arg1 = luaL_checkstring(L, 1);
     const char* arg2 = luaL_checkstring(L, 2);
@@ -254,11 +302,24 @@ static int lua_staticdata_get(lua_State *L) {
         entry = staticdata_registry_find(arg1);
         if (entry) { guid_str = arg2; type_name = arg1; }
     }
+    // Every nil this function returns used to be silent, which is how
+    // Ext.StaticData.Get(guid, "Progression") returning nil went unnoticed for
+    // two months: the only symptom was the Expansion mod dereferencing it
+    // (EXP_Lib.lua:40) inside a StatsLoaded handler. Track why the lookup
+    // failed so the nil comes with a line naming the type, the GUID and the
+    // stage that gave up.
+    StaticDataManagerStatus mgr_status = STATICDATA_MGR_OK;
+    bool manager_seen = false;
+
     if (entry && resource_layout_find(entry->name)) {
-        void *obj = staticdata_registry_get_object_by_guid_string(entry, guid_str);
-        if (obj) {
-            lua_resource_object_push(L, obj, entry->name);
-            return 1;
+        void *mgr = staticdata_registry_get_manager_ex(entry, &mgr_status);
+        manager_seen = true;
+        if (mgr) {
+            void *obj = staticdata_registry_get_object_by_guid_string(entry, guid_str);
+            if (obj) {
+                lua_resource_object_push(L, obj, entry->name);
+                return 1;
+            }
         }
         // Not in the bank: fall through so a hooked manager can still answer.
     }
@@ -267,6 +328,7 @@ static int lua_staticdata_get(lua_State *L) {
         if (entry) {
             void *obj = staticdata_registry_get_object_by_guid_string(entry, guid_str);
             if (!obj) {
+                staticdata_log_miss(entry, type_name, guid_str, manager_seen, mgr_status);
                 lua_pushnil(L);
                 return 1;
             }
@@ -277,12 +339,14 @@ static int lua_staticdata_get(lua_State *L) {
     }
 
     if (!staticdata_has_manager((StaticDataType)type)) {
+        staticdata_log_miss(entry, type_name, guid_str, manager_seen, mgr_status);
         lua_pushnil(L);
         return 1;
     }
 
     StaticDataPtr hooked = staticdata_get_by_guid_string((StaticDataType)type, guid_str);
     if (!hooked) {
+        staticdata_log_miss(entry, type_name, guid_str, manager_seen, mgr_status);
         lua_pushnil(L);
         return 1;
     }

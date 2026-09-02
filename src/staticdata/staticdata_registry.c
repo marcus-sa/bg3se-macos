@@ -61,62 +61,184 @@ static void *headmaster_instance(void) {
     return hm;
 }
 
-void *staticdata_registry_get_manager(const StaticDataTypeEntry *entry) {
-    if (!entry) return NULL;
+// Itanium ABI address point: an object's vptr is the vtable symbol + 0x10.
+// Every one of the 105 manager vtables in this build starts with an all-zero
+// offset-to-top slot and an all-zero typeinfo slot (no RTTI), so there is
+// nothing else between the symbol and slot 0. See
+// generated_staticdata_vtables.c and ghidra/offsets/STATICDATA_HEADMASTER_LOOKUP.md.
+#define VTABLE_ADDRESS_POINT    0x10
 
-    uintptr_t base = g_image_base;
-    if (!base) return NULL;
+// Itanium ABI guard variable for a function-local static, emitted immediately
+// after the object it guards. Its low byte is non-zero once the static has been
+// initialised. Confirmed for every type in the table: __ZGVN2ls6TypeId...
+// m_TypeIndexE sits at exactly m_TypeIndex + 8.
+#define TYPE_INDEX_GUARD_OFFSET 8
 
-    void *hm = headmaster_instance();
-    if (!hm) return NULL;
-
-    // The per-type index lives in a game global, assigned during type
-    // registration; it is not a compile-time constant.
-    int32_t type_index = 0;
-    if (!safe_memory_read_i32((mach_vm_address_t)(base + entry->index_offset), &type_index)
-        || type_index < 0) {
-        return NULL;
+const char *staticdata_registry_status_name(StaticDataManagerStatus st) {
+    switch (st) {
+        case STATICDATA_MGR_OK:             return "ok";
+        case STATICDATA_MGR_NO_HEADMASTER:  return "headmaster not up";
+        case STATICDATA_MGR_NO_TYPE_INDEX:  return "m_TypeIndex never initialised";
+        case STATICDATA_MGR_NOT_REGISTERED: return "no bank of this type in the headmaster";
+        case STATICDATA_MGR_UNREADABLE:     return "headmaster map unreadable";
     }
+    return "unknown";
+}
 
-    int32_t hash_size = 0;
-    if (!safe_memory_read_i32((mach_vm_address_t)hm + HM_HASHSIZE_OFFSET, &hash_size)
-        || hash_size <= 0) {
-        return NULL;
+static uint64_t vtable_offset_for(const char *engine_class) {
+    if (!engine_class) return 0;
+    for (int i = 0; g_staticdata_vtables[i].engine_class; i++) {
+        if (strcmp(g_staticdata_vtables[i].engine_class, engine_class) == 0) {
+            return g_staticdata_vtables[i].vtable_offset;
+        }
     }
+    return 0;
+}
 
-    void *hash_keys = NULL, *next_ids = NULL, *keys = NULL, *values = NULL;
-    if (!safe_memory_read_pointer((mach_vm_address_t)hm + HM_HASHKEYS_OFFSET, &hash_keys)
-        || !safe_memory_read_pointer((mach_vm_address_t)hm + HM_NEXTIDS_OFFSET, &next_ids)
-        || !safe_memory_read_pointer((mach_vm_address_t)hm + HM_KEYS_OFFSET, &keys)
-        || !safe_memory_read_pointer((mach_vm_address_t)hm + HM_VALUES_OFFSET, &values)
-        || !hash_keys || !next_ids || !keys || !values) {
-        return NULL;
+// True if `bank` really is an instance of `entry`'s engine class.
+static bool bank_matches_type(const StaticDataTypeEntry *entry, void *bank) {
+    uint64_t vt = vtable_offset_for(entry->engine_class);
+    if (!vt) return true;   // unknown vtable: nothing to check against
+
+    void *vptr = NULL;
+    if (!safe_memory_read_pointer((mach_vm_address_t)bank, &vptr)) return false;
+    return (uintptr_t)vptr == g_image_base + vt + VTABLE_ADDRESS_POINT;
+}
+
+// Fields of the headmaster's manager HashMap, read once.
+typedef struct {
+    int32_t hash_size;
+    int32_t key_count;
+    void *hash_keys, *next_ids, *keys, *values;
+} HeadmasterMap;
+
+static bool read_headmaster_map(void *hm, HeadmasterMap *m) {
+    if (!safe_memory_read_i32((mach_vm_address_t)hm + HM_HASHSIZE_OFFSET, &m->hash_size)
+        || m->hash_size <= 0) {
+        return false;
     }
+    if (!safe_memory_read_i32((mach_vm_address_t)hm + HM_KEYCOUNT_OFFSET, &m->key_count)
+        || m->key_count < 0) {
+        return false;
+    }
+    return safe_memory_read_pointer((mach_vm_address_t)hm + HM_HASHKEYS_OFFSET, &m->hash_keys)
+        && safe_memory_read_pointer((mach_vm_address_t)hm + HM_NEXTIDS_OFFSET, &m->next_ids)
+        && safe_memory_read_pointer((mach_vm_address_t)hm + HM_KEYS_OFFSET, &m->keys)
+        && safe_memory_read_pointer((mach_vm_address_t)hm + HM_VALUES_OFFSET, &m->values)
+        && m->hash_keys && m->next_ids && m->keys && m->values;
+}
 
+// Chain walk keyed by type_index. NULL if the index is not in the map.
+static void *lookup_by_type_index(const HeadmasterMap *m, int32_t type_index) {
     int32_t idx = 0;
-    if (!safe_memory_read_i32((mach_vm_address_t)hash_keys
-                              + (size_t)(type_index % hash_size) * 4, &idx)) {
+    if (!safe_memory_read_i32((mach_vm_address_t)m->hash_keys
+                              + (size_t)(type_index % m->hash_size) * 4, &idx)) {
         return NULL;
     }
 
     for (int probe = 0; idx >= 0 && probe < HM_MAX_PROBE; probe++) {
         int32_t candidate = 0;
-        if (!safe_memory_read_i32((mach_vm_address_t)keys + (size_t)idx * 4, &candidate)) {
+        if (!safe_memory_read_i32((mach_vm_address_t)m->keys + (size_t)idx * 4, &candidate)) {
             return NULL;
         }
         if (candidate == type_index) {
             void *mgr = NULL;
-            if (!safe_memory_read_pointer((mach_vm_address_t)values + (size_t)idx * 8, &mgr)) {
+            if (!safe_memory_read_pointer((mach_vm_address_t)m->values + (size_t)idx * 8, &mgr)) {
                 return NULL;
             }
             return mgr;
         }
-        if (!safe_memory_read_i32((mach_vm_address_t)next_ids + (size_t)idx * 4, &idx)) {
+        if (!safe_memory_read_i32((mach_vm_address_t)m->next_ids + (size_t)idx * 4, &idx)) {
             return NULL;
         }
     }
-
     return NULL;
+}
+
+// Linear sweep of the map's values for a bank whose vptr is this type's.
+// The only route left when m_TypeIndex has never been initialised, and the
+// arbiter when the index route lands on a foreign bank.
+static void *lookup_by_vtable(const StaticDataTypeEntry *entry, const HeadmasterMap *m) {
+    if (!vtable_offset_for(entry->engine_class)) return NULL;
+
+    int32_t n = m->key_count;
+    if (n > HM_MAX_PROBE) n = HM_MAX_PROBE;
+    for (int32_t i = 0; i < n; i++) {
+        void *bank = NULL;
+        if (!safe_memory_read_pointer((mach_vm_address_t)m->values + (size_t)i * 8, &bank)
+            || !bank) {
+            continue;
+        }
+        if (bank_matches_type(entry, bank)) return bank;
+    }
+    return NULL;
+}
+
+void *staticdata_registry_get_manager_ex(const StaticDataTypeEntry *entry,
+                                         StaticDataManagerStatus *out_status) {
+    StaticDataManagerStatus st = STATICDATA_MGR_NOT_REGISTERED;
+    void *result = NULL;
+
+    if (!entry || !g_image_base) {
+        st = STATICDATA_MGR_NO_HEADMASTER;
+        goto done;
+    }
+
+    void *hm = headmaster_instance();
+    if (!hm) {
+        st = STATICDATA_MGR_NO_HEADMASTER;
+        goto done;
+    }
+
+    HeadmasterMap map;
+    if (!read_headmaster_map(hm, &map)) {
+        st = STATICDATA_MGR_UNREADABLE;
+        goto done;
+    }
+
+    /*
+     * The per-type index lives in a game global assigned by a guarded static
+     * initialiser. Reading it without checking the guard is what made
+     * Ext.StaticData.Get("Progression") wrong rather than merely absent: the
+     * global ships as 0, and 0 is the real index of whichever type registered
+     * first, so the map walk returned a foreign bank and GetObjectByKey then
+     * failed on it. Take the index only once the guard says it was written.
+     */
+    uint8_t guard = 0;
+    int32_t type_index = 0;
+    bool index_valid =
+        safe_memory_read(g_image_base + entry->index_offset + TYPE_INDEX_GUARD_OFFSET,
+                         &guard, 1)
+        && guard != 0
+        && safe_memory_read_i32((mach_vm_address_t)(g_image_base + entry->index_offset),
+                                &type_index)
+        && type_index >= 0;
+
+    if (index_valid) {
+        void *mgr = lookup_by_type_index(&map, type_index);
+        // Still check the vptr: a stale or recycled index must not be trusted
+        // just because the guard has run.
+        if (mgr && bank_matches_type(entry, mgr)) {
+            result = mgr;
+            st = STATICDATA_MGR_OK;
+            goto done;
+        }
+    }
+
+    result = lookup_by_vtable(entry, &map);
+    if (result) {
+        st = STATICDATA_MGR_OK;
+    } else {
+        st = index_valid ? STATICDATA_MGR_NOT_REGISTERED : STATICDATA_MGR_NO_TYPE_INDEX;
+    }
+
+done:
+    if (out_status) *out_status = st;
+    return result;
+}
+
+void *staticdata_registry_get_manager(const StaticDataTypeEntry *entry) {
+    return staticdata_registry_get_manager_ex(entry, NULL);
 }
 
 // ls::ModdableFilesLoader<ls::Guid, T>::GetObjectByKey(Guid const&) const.

@@ -15,6 +15,7 @@ Reverse-engineered offset documentation from Ghidra analysis of the BG3 macOS bi
 | [STATS_SYSTEM.md](STATS_SYSTEM.md) | Stats system architecture |
 | [STATICDATA.md](STATICDATA.md) | Static data system |
 | [STATICDATA_MANAGERS.md](STATICDATA_MANAGERS.md) | Manager singletons |
+| [STATICDATA_HEADMASTER_LOOKUP.md](STATICDATA_HEADMASTER_LOOKUP.md) | Headmaster type-index guard + per-type vtable identification |
 | [GLOBALSTRINGTABLE.md](GLOBALSTRINGTABLE.md) | String table offsets |
 
 ## Entity & Components
