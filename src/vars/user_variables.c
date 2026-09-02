@@ -8,7 +8,6 @@
  */
 
 #include "user_variables.h"
-#include "vars_persist.h"
 #include "../lua/lua_json.h"
 #include "../core/logging.h"
 
@@ -1001,10 +1000,11 @@ static int lua_get_entities_with_variable(lua_State *L) {
 // ============================================================================
 
 static int lua_sync_user_variables(lua_State *L) {
-    // Windows uses this to push variables to peers; here it is also the mod's
-    // explicit "write now". The tick flush already persists without it — no
-    // mod may be relied on to call this — so it only shortens the window.
-    vars_persist_flush_now(L);
+    (void)L;
+    // Windows uses this to push variables to peers, not to write the savegame.
+    // It must not write the store either: the store is a snapshot of the last
+    // save, and a mod calling this mid-session would stamp post-save state onto
+    // that save, which is exactly the divergence this port had before.
     return 0;
 }
 
@@ -1464,7 +1464,8 @@ static int lua_get_mod_variables(lua_State *L) {
 // ============================================================================
 
 static int lua_sync_mod_variables(lua_State *L) {
-    vars_persist_flush_now(L);
+    (void)L;
+    // See lua_sync_user_variables: peer sync, never a store write.
     return 0;
 }
 

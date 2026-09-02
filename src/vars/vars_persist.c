@@ -1,6 +1,33 @@
 /**
  * BG3SE-macOS - Ext.Vars savegame persistence
  *
+ * What the store is
+ * -----------------
+ * A SNAPSHOT of the mod/entity variable set as of the moment the game wrote a
+ * savegame, one JSON file per savegame under
+ * Application Support/BG3SE/SaveVars/<savegame folder>.json.
+ *
+ * "As of the save" is the whole contract, not an implementation detail. On
+ * Windows these variables live inside the .lsv, so they are captured when the
+ * save is taken and rewind with it by construction. A sidecar only behaves like
+ * a savegame if it is written at the same instant the savegame is.
+ *
+ * This used to be a 5-second timer, and that was a real bug, not a rounding
+ * error: the file ended up holding whatever was live at the last tick, so
+ * loading a save restored post-save state and could not rewind. Observed with
+ * Sit This One Out 2, which holds Vars.LeftCombat[uuid][combat] while a
+ * character sits out and deletes LeftCombat[uuid] on CombatEnded (SitOut.lua:694):
+ * the store carried three combats the mod had already cleaned up, and DoSitOut
+ * (SitOut.lua:596) skips its ApplyStatus for anyone with a non-empty
+ * LeftCombat[uuid] — so the mod refused to work, and reloading (the player's fix)
+ * restored the very state they were clearing.
+ *
+ * Therefore: NOTHING is written between saves. Do not add a timer, a flush on
+ * quit, a flush on shutdown, or an Ext.Vars API that writes on demand. Changes a
+ * mod makes after the last save are deliberately lost on crash or on quitting
+ * without saving, exactly as every other piece of savegame state is; a store
+ * that outlived its save would be worse than no store at all.
+ *
  * Why a sidecar and not the savegame
  * ----------------------------------
  * Windows BG3SE hooks esv::OsirisVariableHelper::SavegameVisit and appends a
@@ -19,28 +46,63 @@
  *      Lua gate exists to prevent. The sidecar path does all of its Lua work on
  *      the Osiris event thread under that gate instead.
  *
- * Identifying the savegame
- * ------------------------
+ * Detecting a save without a hook
+ * -------------------------------
+ * The tick watches the game's own save directory for a savegame PAYLOAD that
+ * was written after we last accounted for one, scoring each save by the newer
+ * of the save folder's mtime and its .lsv's mtime:
+ *
+ *   - a new save folder bumps the folder's mtime AND creates the .lsv;
+ *   - overwriting an existing slot can leave the folder untouched entirely.
+ *     Real instance in this profile: QuickSave_69's .lsv has mtime 13:27:21
+ *     while its folder still reads 12:29:01, an hour earlier — the payload was
+ *     rewritten in place. Keying adoption on folder CREATION, as this file used
+ *     to, misses that save completely and keeps writing to the previous key.
+ *
+ * Reads never move mtime, so loading a save can never be mistaken for writing
+ * one — which is what keeps the load path (below) and this one apart.
+ *
+ * Known limitation: anything else that creates or rewrites a save folder while
+ * the game runs — a cloud sync restoring another machine's saves, a file copy —
+ * looks like a save from here, and the next snapshot would go to that save's
+ * store. It is the same exposure the previous folder-creation heuristic had. A
+ * savegame hook would close it, and is the reason to revisit one; see below for
+ * why there is no hook today.
+ *
+ * No hook is installed for this, on any build. A code hook would have to be
+ * gated on the exact build or it resolves to a different live function, and it
+ * could only tell us that *a* save is happening — never which folder it lands
+ * in, which is the part the store actually needs. Filesystem observation is
+ * build-independent, so there is no address to guess and nothing to fail open:
+ * if no save can be identified, no file is written and the store keeps the
+ * contents of the last save that was.
+ *
+ * FSEvents/kqueue were rejected: kqueue reports directory-level changes only
+ * (it would miss the in-place rewrite above), and FSEvents needs a CFRunLoop
+ * thread whose callbacks could not touch Lua anyway — it would have to hand the
+ * work back to this tick, which is where it already happens.
+ *
+ * Identifying the savegame on load
+ * --------------------------------
  * A single global file lets one playthrough overwrite another's variables (the
  * profile here holds saves for five different characters), so the store is
  * keyed by savegame folder name. Without the hook there is no callback that
- * names the save, so the name is recovered from the game's own save directory:
- *
- *   restore  the save whose .lsv was most recently READ (max of atime/mtime),
- *            considering only files touched after this process started. The
- *            game reads the .lsv to load it, and it does so after the load
- *            menu has finished enumerating, so the loaded save is last.
- *   persist  the save directory most recently CREATED after we attached. That
- *            is the player saving, and the live variables must carry forward
- *            into the new file.
+ * names the save being loaded, so the name is recovered from the game's own
+ * save directory: the save whose .lsv was most recently READ (max of
+ * atime/mtime), considering only files touched after this process started. The
+ * game reads the .lsv to load it, and it does so after the load menu has
+ * finished enumerating, so the loaded save is last.
  *
  * Limitation, stated plainly: atime is a heuristic. If it cannot single out a
  * save the store stays detached and nothing is written — the failure mode is
- * "no variables", never another savegame's variables. BG3SE_VARS_STORE_KEY
- * overrides the resolver entirely.
+ * "no variables", never another savegame's variables. The next save the player
+ * makes is unambiguous (it is a payload write, not a read) and attaches us.
+ * BG3SE_VARS_STORE_KEY overrides the resolver entirely.
  *
  * Threading: every entry point runs on the Osiris event thread while main.c
- * holds the Lua gate. There is no lock here on purpose.
+ * holds the Lua gate. Serialization reads Lua state (uvar_store_build goes
+ * through mvar_get/uvar_get), so it must not happen anywhere else. There is no
+ * lock here on purpose.
  */
 
 #include "vars_persist.h"
@@ -66,8 +128,14 @@
 // ============================================================================
 
 #define VARS_KEY_MAX 192
-#define VARS_FLUSH_INTERVAL_MS 5000
 #define VARS_STORE_MAX_BYTES (16 * 1024 * 1024)
+
+/* How often the tick may re-stat the save directory. This throttles DETECTION,
+ * never writing: a scan that finds nothing writes nothing, and the interval is
+ * only the worst-case delay between the game finishing a save and the snapshot
+ * being taken. A profile with 289 saves costs ~600 stats per scan, so 1 Hz is
+ * about 1 ms/s of one core. */
+#define VARS_SAVE_SCAN_INTERVAL_MS 1000
 
 // ============================================================================
 // State
@@ -75,10 +143,10 @@
 
 static char s_store_dir[PATH_MAX];
 static char s_key[VARS_KEY_MAX];        // "" when detached
-static time_t s_watch_since;            // adopt only save folders created at/after this
-static time_t s_process_start;
+static uint64_t s_save_watermark_ns;    // newest save payload write already handled
+static uint64_t s_process_start_ns;
 static bool s_session_active;
-static uint64_t s_last_flush_ms;
+static uint64_t s_last_scan_ms;
 static char *s_last_written;            // last payload written, for change detection
 
 // ============================================================================
@@ -89,6 +157,32 @@ static uint64_t monotonic_ms(void) {
     static mach_timebase_info_data_t tb = {0};
     if (tb.denom == 0) mach_timebase_info(&tb);
     return (mach_absolute_time() * tb.numer) / (tb.denom * 1000000ULL);
+}
+
+/* Wall clock, in the same units as the file timestamps it is compared against. */
+static uint64_t wall_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t timespec_ns(struct timespec ts) {
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* When this file's contents were last written. mtime only, deliberately: ctime
+ * also moves for metadata-only changes (an xattr from a backup or indexing
+ * tool), and a spurious "this save was just written" is the one failure this
+ * file must not have — it would attach the live campaign's variables to some
+ * other campaign's save. A save the game writes always carries a fresh mtime. */
+static uint64_t stat_written_ns(const struct stat *st) {
+    return timespec_ns(st->st_mtimespec);
+}
+
+static uint64_t stat_read_ns(const struct stat *st) {
+    uint64_t a = timespec_ns(st->st_atimespec);
+    uint64_t m = timespec_ns(st->st_mtimespec);
+    return a > m ? a : m;
 }
 
 static void ensure_dir(const char *path) {
@@ -175,12 +269,11 @@ static bool stat_savegame_payload(const char *save_dir, const char *save_name,
 
 typedef enum {
     PICK_MOST_RECENTLY_READ,     /* the save that was just loaded */
-    PICK_MOST_RECENTLY_CREATED   /* the save the player just made */
+    PICK_MOST_RECENTLY_WRITTEN   /* the save the game just wrote */
 } SavegamePick;
 
 static bool scan_story_dir(const char *story_dir, SavegamePick pick,
-                           time_t not_before, char *out, size_t out_n,
-                           time_t *best_score, time_t *out_created) {
+                           char *out, size_t out_n, uint64_t *best_ns) {
     DIR *d = opendir(story_dir);
     if (!d) return false;
 
@@ -196,23 +289,31 @@ static bool scan_story_dir(const char *story_dir, SavegamePick pick,
         struct stat dir_st;
         if (stat(save_dir, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode)) continue;
 
-        time_t score;
-        if (pick == PICK_MOST_RECENTLY_CREATED) {
-            score = dir_st.st_mtime;
+        struct stat lsv_st;
+        bool have_lsv = stat_savegame_payload(save_dir, e->d_name, &lsv_st);
+
+        uint64_t score;
+        if (pick == PICK_MOST_RECENTLY_WRITTEN) {
+            // Both halves are needed. The folder alone misses a slot whose .lsv
+            // was rewritten in place; the .lsv alone misses the instant between
+            // the folder appearing and its payload landing.
+            score = stat_written_ns(&dir_st);
+            if (have_lsv) {
+                uint64_t payload = stat_written_ns(&lsv_st);
+                if (payload > score) score = payload;
+            }
         } else {
-            struct stat lsv_st;
-            if (!stat_savegame_payload(save_dir, e->d_name, &lsv_st)) continue;
-            score = lsv_st.st_atime > lsv_st.st_mtime ? lsv_st.st_atime : lsv_st.st_mtime;
+            if (!have_lsv) continue;
+            score = stat_read_ns(&lsv_st);
         }
 
-        // *best_score carries across profiles, so compare against it rather
-        // than a per-directory "first hit" — otherwise the first candidate in
-        // the second profile would displace a better one from the first.
-        if (score < not_before) continue;
-        if (score <= *best_score) continue;
+        // *best_ns starts at the caller's cutoff and carries across profiles, so
+        // comparing against it is both the "newer than we've handled" test and
+        // the "beats every other candidate" test. Strictly greater: a save we
+        // have already snapshotted must not be snapshotted again.
+        if (score <= *best_ns) continue;
 
-        *best_score = score;
-        *out_created = dir_st.st_mtime;
+        *best_ns = score;
         snprintf(out, out_n, "%s", e->d_name);
         found = true;
     }
@@ -221,11 +322,10 @@ static bool scan_story_dir(const char *story_dir, SavegamePick pick,
     return found;
 }
 
-static bool resolve_savegame(SavegamePick pick, time_t not_before,
-                             char *out, size_t out_n, time_t *out_created) {
+static bool resolve_savegame(SavegamePick pick, uint64_t after_ns,
+                             char *out, size_t out_n, uint64_t *out_score_ns) {
     const char *home = getenv("HOME");
     if (!home) return false;
-    if (not_before < 1) not_before = 1;   /* keeps "best so far = 0" meaningful */
 
     char profiles[PATH_MAX];
     if (snprintf(profiles, sizeof(profiles),
@@ -236,19 +336,20 @@ static bool resolve_savegame(SavegamePick pick, time_t not_before,
     if (!d) return false;
 
     bool found = false;
-    time_t best = 0;
+    uint64_t best = after_ns;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.') continue;
         char story[PATH_MAX];
         if (snprintf(story, sizeof(story), "%s/%s/Savegames/Story", profiles, e->d_name)
             >= (int)sizeof(story)) continue;
-        if (scan_story_dir(story, pick, not_before, out, out_n, &best, out_created)) {
+        if (scan_story_dir(story, pick, out, out_n, &best)) {
             found = true;
         }
     }
 
     closedir(d);
+    if (found && out_score_ns) *out_score_ns = best;
     return found;
 }
 
@@ -301,7 +402,9 @@ static void remember_payload(const char *json, size_t len) {
     }
 }
 
-static void flush_locked(lua_State *L) {
+/* Serialize the live variable set into the attached save's store. Reads Lua
+ * state, so this only ever runs on the game thread under the Lua gate. */
+static void snapshot_locked(lua_State *L) {
     if (!L || s_key[0] == '\0') return;
 
     char path[PATH_MAX];
@@ -311,10 +414,9 @@ static void flush_locked(lua_State *L) {
     size_t len = build_payload(L, &json);
     if (!json) { lua_pop(L, 1); return; }
 
-    // Dirty flags only catch mvar_set/uvar_set; a mod that mutates a cached
-    // table in place (Vars.Foo[k] = v) never sets one. Comparing the rendered
-    // payload is what makes that case persist, and it is also what keeps the
-    // tick from rewriting an unchanged file every 5 seconds.
+    // A long save writes its .lsv over several seconds, so one save can be
+    // observed by more than one scan. Comparing the rendered payload keeps the
+    // repeat snapshots free instead of rewriting an identical file.
     if (s_last_written && strcmp(s_last_written, json) == 0) {
         lua_pop(L, 1);
         return;
@@ -322,12 +424,12 @@ static void flush_locked(lua_State *L) {
 
     if (write_atomic(path, json, len)) {
         remember_payload(json, len);
-        LOG_PERSIST_INFO("Ext.Vars: wrote %zu bytes for savegame '%s'", len, s_key);
+        LOG_PERSIST_INFO("Ext.Vars: snapshot of %zu bytes for savegame '%s'", len, s_key);
     }
     lua_pop(L, 1);
 }
 
-/* Move a store we could not parse aside instead of letting the next flush
+/* Move a store we could not parse aside instead of letting the next snapshot
  * overwrite it. A malformed store may still be the only copy of a player's
  * mod state, and "degrade to no variables" must not also mean "destroy". */
 static void quarantine_store(const char *path) {
@@ -413,11 +515,11 @@ static void restore_locked(lua_State *L) {
 
 static void attach(lua_State *L, const char *key) {
     snprintf(s_key, sizeof(s_key), "%s", key);
-    // Only save folders that appear from here on are "the player just saved".
-    // Anchoring on the attached save's own mtime instead would make loading an
-    // older save immediately adopt whatever newer save happens to sit in the
+    // Only save payloads written from here on count as "the game just saved".
+    // Anchoring on the attached save's own timestamp instead would make loading
+    // an older save immediately adopt whatever newer save happens to sit in the
     // profile, and write this campaign's variables into it.
-    s_watch_since = time(NULL);
+    s_save_watermark_ns = wall_now_ns();
     restore_locked(L);
 }
 
@@ -426,21 +528,23 @@ static void attach(lua_State *L, const char *key) {
 // ============================================================================
 
 void vars_persist_init(void) {
-    s_process_start = time(NULL);
+    s_process_start_ns = wall_now_ns();
     s_key[0] = '\0';
-    s_watch_since = s_process_start;
+    s_save_watermark_ns = s_process_start_ns;
     s_session_active = false;
-    s_last_flush_ms = 0;
+    s_last_scan_ms = 0;
+    free(s_last_written);
+    s_last_written = NULL;
 }
 
 void vars_persist_on_session_begin(lua_State *L) {
     // COsiris::Load rebuilds the story exactly once per session, so this is the
     // one point that reliably separates two campaigns. Detaching here is what
-    // stops the tick from writing the outgoing campaign's variables into the
-    // savegame it was attached to while the next one loads; clearing is what
-    // stops "New Game" straight after a session from inheriting its values.
+    // stops a save made by the next campaign from being written under the
+    // outgoing one's key; clearing is what stops "New Game" straight after a
+    // session from inheriting its values.
     s_key[0] = '\0';
-    s_watch_since = time(NULL);
+    s_save_watermark_ns = wall_now_ns();
     s_session_active = false;
     free(s_last_written);
     s_last_written = NULL;
@@ -459,9 +563,8 @@ void vars_persist_on_savegame_loaded(lua_State *L) {
     }
 
     char name[VARS_KEY_MAX];
-    time_t created = 0;
-    if (resolve_savegame(PICK_MOST_RECENTLY_READ, s_process_start,
-                         name, sizeof(name), &created)) {
+    if (resolve_savegame(PICK_MOST_RECENTLY_READ, s_process_start_ns,
+                         name, sizeof(name), NULL)) {
         attach(L, name);
         return;
     }
@@ -469,9 +572,9 @@ void vars_persist_on_savegame_loaded(lua_State *L) {
     // Nothing readable was touched since launch, so we cannot say which save
     // this is. Persisting under a guess would hand the next campaign this one's
     // variables, so stay detached and let the first save of the session (which
-    // IS unambiguous — it did not exist a moment ago) attach us instead.
+    // IS unambiguous — it is a payload write, not a read) attach us instead.
     s_key[0] = '\0';
-    s_watch_since = time(NULL);
+    s_save_watermark_ns = wall_now_ns();
     uvar_store_clear(L);
     free(s_last_written);
     s_last_written = NULL;
@@ -491,33 +594,38 @@ void vars_persist_tick(lua_State *L) {
     if (!L || !s_session_active) return;
 
     uint64_t now_ms = monotonic_ms();
-    if (s_last_flush_ms != 0 && now_ms - s_last_flush_ms < VARS_FLUSH_INTERVAL_MS) return;
-    s_last_flush_ms = now_ms;
+    if (s_last_scan_ms != 0 && now_ms - s_last_scan_ms < VARS_SAVE_SCAN_INTERVAL_MS) return;
+    s_last_scan_ms = now_ms;
 
-    // Adopt a save folder that appeared after we attached: that is the player
-    // having saved, and the live variables have to carry forward into the new
-    // file. Deliberately keyed on CREATION, not on the read heuristic — a save
-    // being loaded is older than s_watch_since, so this can never take the key
-    // away from vars_persist_on_savegame_loaded before it has restored.
     char name[VARS_KEY_MAX];
-    time_t created = 0;
-    if (resolve_savegame(PICK_MOST_RECENTLY_CREATED, s_watch_since,
-                         name, sizeof(name), &created) &&
-        strcmp(name, s_key) != 0) {
-        snprintf(s_key, sizeof(s_key), "%s", name);
-        time_t now = time(NULL);
-        s_watch_since = (created + 1 > now) ? created + 1 : now;
+    uint64_t written_ns = 0;
+    if (!resolve_savegame(PICK_MOST_RECENTLY_WRITTEN, s_save_watermark_ns,
+                          name, sizeof(name), &written_ns)) {
+        return;   // no save since the last one we handled: write nothing
+    }
+
+    // Advance before snapshotting: a failed write must not leave this save
+    // pending forever, re-firing on every scan for the rest of the session.
+    s_save_watermark_ns = written_ns;
+    vars_persist_on_save_written(L, name);
+}
+
+void vars_persist_on_save_written(lua_State *L, const char *key) {
+    if (!L) return;
+    s_session_active = true;
+
+    if (key && key[0] && strcmp(key, s_key) != 0) {
+        snprintf(s_key, sizeof(s_key), "%s", key);
         free(s_last_written);
         s_last_written = NULL;   /* force a write under the new key */
         LOG_PERSIST_INFO("Ext.Vars: now persisting to savegame '%s'", s_key);
     }
 
-    flush_locked(L);
-}
+    // Detached: the save could not be named, so there is nowhere this snapshot
+    // could go that would not be a guess at another savegame's store.
+    if (s_key[0] == '\0') return;
 
-void vars_persist_flush_now(lua_State *L) {
-    if (!L || s_key[0] == '\0') return;
-    flush_locked(L);
+    snapshot_locked(L);
 }
 
 const char *vars_persist_current_key(void) {
@@ -541,7 +649,11 @@ void vars_persist_attach_key(lua_State *L, const char *key) {
 
 void vars_persist_detach(void) {
     s_key[0] = '\0';
-    s_watch_since = time(NULL);
+    s_save_watermark_ns = wall_now_ns();
     free(s_last_written);
     s_last_written = NULL;
+}
+
+void vars_persist_reset_scan_throttle(void) {
+    s_last_scan_ms = 0;
 }

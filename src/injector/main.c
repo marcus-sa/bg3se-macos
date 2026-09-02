@@ -4825,7 +4825,7 @@ static bool fake_Event(void *thisPtr, uint32_t funcId, OsiArgumentDesc *args) {
         timer_update(L);  // Process timer callbacks
         timer_update_persistent(L);  // Process persistent timer callbacks
         persist_tick(L);  // Check for dirty PersistentVars to auto-save
-        vars_persist_tick(L);  // Adopt new savegames, write Ext.Vars when changed
+        vars_persist_tick(L);  // Snapshot Ext.Vars when the game writes a save
 
         // Fire Tick event with delta time
         double now = timer_get_monotonic_ms();

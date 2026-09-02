@@ -404,3 +404,53 @@ worker-thread job, so serializing variables there means entering the server
 `lua_State` off the game thread. `src/vars/vars_persist.c` therefore persists a
 sidecar store from the Osiris event thread under the Lua gate instead, and
 documents there how it identifies the savegame without this hook.
+
+## Save-time detection for Ext.Vars (2026-09-02): no hook is used
+
+`src/vars/vars_persist.c` needs to know *when the game writes a save* so its
+sidecar store is a snapshot of that save rather than of an arbitrary later
+moment. It does not use any function in this document, and installs no hook.
+
+Reasons, in order of weight:
+
+1. **A hook cannot answer the question that matters.** Every seam above tells us
+   that *a* save is happening; none of them hands us the savegame folder the
+   payload lands in, and the folder name is the store's key. The filesystem has
+   to be consulted either way, and once it is, it also answers "did a save
+   happen".
+2. **Thread.** The write side is reached from `esv::SaveSystem::DoSaveFlow`, a
+   worker-thread job. Serialization reads the server `lua_State`
+   (`uvar_store_build` → `mvar_get`/`uvar_get`), so it may only run on the
+   Osiris event thread under the Lua gate. A hook could therefore only signal,
+   with the work still happening on the tick — which is where it now happens
+   without a hook.
+3. **The runtime gate above has not been passed on 7398727.** Only the static
+   half is re-verified. `savegame_hook.c` stays disarmed and keeps naming
+   7209685.
+4. **Fail-closed.** A build-gated address that does not match fails closed only
+   because of the gate; filesystem observation has no address to be wrong about
+   on an unknown build, and its own failure mode is "no save identified → write
+   nothing → the store keeps the last save's contents".
+
+What it does instead: once a second, from the Osiris tick, it scores every save
+folder by the newer of the folder's `mtime` and its `.lsv`'s `mtime`, and treats
+a score newer than the last one it handled as "the game just wrote this save".
+Both halves are required — an overwrite can rewrite the payload in place and
+leave the folder's timestamps alone. Real instance in the local profile:
+
+```text
+Nihilus-28912610655__QuickSave_69            mtime 2026-07-09 12:29:01
+Nihilus-28912610655__QuickSave_69/…_69.lsv   mtime 2026-07-09 13:27:21
+                                             ctime 2026-07-09 13:27:22
+                                             birth 2026-07-09 12:28:58
+```
+
+`ctime` is deliberately not part of the score: it also moves for metadata-only
+changes, and a spurious "this save was just written" would attach the live
+campaign's variables to another campaign's save. Reads never move `mtime`, so
+loading a save cannot be mistaken for writing one; that is what keeps this apart
+from the `atime`-based resolver the load path uses.
+
+What a hook would still buy, if the runtime gate above is ever passed: an
+authoritative save signal, immune to a cloud sync or a file copy that rewrites a
+save folder while the game runs and currently reads as a save from here.

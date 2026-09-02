@@ -3,9 +3,11 @@
  *
  * Mod variables and entity user variables belong to a savegame. Windows BG3SE
  * writes them into the savegame itself (esv::OsirisVariableHelper::SavegameVisit
- * -> ScriptExtenderSave region); this port writes a sidecar store per savegame
- * under ~/Library/Application Support/BG3SE/SaveVars/ instead. See vars_persist.c
- * for why, and for how the savegame is identified.
+ * -> ScriptExtenderSave region), so they are snapshotted when the save is taken
+ * and rewind with it. This port writes a sidecar store per savegame under
+ * ~/Library/Application Support/BG3SE/SaveVars/ and reproduces that property by
+ * writing the store ONLY when the game writes a save. See vars_persist.c for why
+ * a sidecar, how a save is detected, and what is deliberately not persisted.
  */
 
 #ifndef BG3SE_VARS_PERSIST_H
@@ -33,30 +35,36 @@ void vars_persist_on_session_begin(lua_State *L);
 
 /**
  * A savegame finished loading (Osiris SavegameLoaded). Identifies which save
- * was read, replaces the whole variable set with that save's store, and starts
- * persisting under it.
+ * was read and replaces the whole variable set with that save's snapshot.
  */
 void vars_persist_on_savegame_loaded(lua_State *L);
 
 /**
- * Gameplay started (Osiris LevelGameplayStarted). Marks the session live so
- * the tick may adopt the first save the player makes. Never restores and never
- * clears: it also fires on level transitions inside a session, where wiping the
- * live variables would destroy the very state mods are mid-way through using.
+ * Gameplay started (Osiris LevelGameplayStarted). Marks the session live so a
+ * save the player makes can be noticed. Never restores and never clears: it
+ * also fires on level transitions inside a session, where wiping the live
+ * variables would destroy the very state mods are mid-way through using.
  */
 void vars_persist_on_level_started(lua_State *L);
 
 /**
- * Called from the Osiris tick. Adopts a savegame the player just created and
- * writes the store when its contents changed. Rate-limited internally.
+ * Called from the Osiris tick, on the game thread, under the Lua gate. Looks
+ * for a savegame the game has just written to disk and, when it finds one,
+ * snapshots the variable set into that save's store.
+ *
+ * Between saves this writes NOTHING. That is the contract: the store has to
+ * hold the variables as of the save it is named after, or a reload restores
+ * post-save state instead of rewinding to it.
  */
 void vars_persist_tick(lua_State *L);
 
 /**
- * Write the store immediately, ignoring the rate limit. No-op when no savegame
- * is attached.
+ * The game wrote savegame `key` (NULL/"" keeps the attached one): adopt it and
+ * snapshot the variable set into its store, on the caller's thread. Only ever
+ * call this where a save has actually been written — an out-of-band call is
+ * what puts post-save state into a save's store.
  */
-void vars_persist_flush_now(lua_State *L);
+void vars_persist_on_save_written(lua_State *L, const char *key);
 
 /** Attached savegame name, or "" when nothing is attached. */
 const char *vars_persist_current_key(void);
@@ -73,6 +81,12 @@ void vars_persist_attach_key(lua_State *L, const char *key);
 
 /** Forget the attached savegame without touching the variables. */
 void vars_persist_detach(void);
+
+/**
+ * Drop the tick's scan throttle so the next vars_persist_tick() re-reads the
+ * savegame directory immediately, instead of waiting out the scan interval.
+ */
+void vars_persist_reset_scan_throttle(void);
 
 #ifdef __cplusplus
 }
