@@ -66,23 +66,21 @@ typedef enum {
     ALIAS_FULL       /* + namespace rewriting for every category */
 } AliasMode;
 
-/* Full, minus the velocity variant. Three observed outcomes pin this down:
+/* Alias as widely as possible. Four runs converge on one rule -- a miss is
+ * never free:
  *
- *   nothing aliased  -> Immolation Aura crashes instantly (decal null pipeline)
- *   decals only      -> no corruption, but the aura hangs the whole game
- *   everything       -> aura renders, whole screen streaks with RGB "lightning"
+ *   nothing aliased   -> aura crashes instantly (decal null pipeline)
+ *   decals only       -> aura hangs the whole game
+ *   all but _VEL      -> aura no longer bricks but everything crawls
+ *                        (130 misses -> 130 stalled pipeline compiles), and
+ *                        the screen corruption is STILL there
+ *   everything        -> aura renders; corruption present
  *
- * Partial aliasing being WORSE than none says an effect needs all of its
- * materials or none: aliasing the decal while its sibling Model/ParticleSystem
- * materials stay missing leaves the effect half-built. So the split is not by
- * category -- it is by render variant.
- *
- * _VEL writes motion vectors. Garbage there feeds TAA, which smears across the
- * entire frame and flickers between frames -- "lightning going everywhere, on
- * and off". And a missing velocity shader is demonstrably survivable here:
- * Shaders/Metal/VelocityBufferStaticInstanced.bshd misses in every session and
- * never faulted, because this macOS build ships no *StaticInstanced* symbol at
- * all -- instanced static velocity is simply absent from the platform. */
+ * The third run is what settles it. Skipping _VEL did not remove the RGB
+ * streaks, so velocity was never their source, and each miss it created cost
+ * an unbounded AddPipelineState wait instead. Corruption is a real and still
+ * unexplained problem, but it is not one the miss/alias axis controls, and
+ * trading it for hangs buys nothing. */
 static AliasMode s_mode = ALIAS_FULL;
 
 /* Render variants never substituted. Comma-separated, BG3SE_SHADER_ALIAS_SKIP. */
@@ -91,8 +89,16 @@ static char s_skip[MAX_SKIP_VARIANTS][16];
 static int  s_skip_count = 0;
 
 static void skip_variants_init(void) {
+    /* Default: skip nothing. A miss is never free -- it either reaches the
+     * renderer as a null pipeline (crash) or leaves a pipeline-cache entry
+     * whose compile never completes, which rf::IAppStage::AddPipelineState
+     * waits on in an unbounded yield loop (hang). Skipping _VEL produced 130
+     * misses in one session: the game stopped bricking but crawled -- a save
+     * that rendered only the player for a long stretch before the UI appeared,
+     * and an Immolation Aura cast that took forever. The screen corruption it
+     * was meant to fix was still there, so _VEL was never the cause. */
     const char *e = getenv("BG3SE_SHADER_ALIAS_SKIP");
-    if (!e) e = "VEL";                    /* default: motion vectors only */
+    if (!e) return;
     while (*e && s_skip_count < MAX_SKIP_VARIANTS) {
         while (*e == ',' || *e == ' ') e++;
         size_t n = 0;
