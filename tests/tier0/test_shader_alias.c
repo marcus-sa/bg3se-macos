@@ -93,13 +93,20 @@ TEST(candidates_for_clone_inside_mod_namespace) {
                                   "M_01_ST_DEF.bshd");
 }
 
-TEST(candidates_empty_for_engine_shader_with_no_alias) {
-    /* VelocityBufferStaticInstanced has no macOS counterpart at all — only
-     * VelocityBufferStatic and VelocityBufferCamera ship. Guessing one would
-     * bind a shader with a different vertex layout, so we produce none. */
+TEST(candidates_alias_instanced_velocity_to_plain) {
+    /* Core.metallib ships VelocityBufferStatic and VelocityBufferCamera and no
+     * *StaticInstanced* symbol at all. Leaving this unaliased is not a skipped
+     * draw — it is the engine's own velocity fallback resolving to null, which
+     * bricks the game, so the non-instanced variant is the honest target. */
     char c[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
     ASSERT_EQ(shader_alias_candidates(
-        "Shaders/Metal/VelocityBufferStaticInstanced.bshd", c), 0);
+        "Shaders/Metal/VelocityBufferStaticInstanced.bshd", c), 1);
+    ASSERT_STR_EQ(c[0], "Shaders/Metal/VelocityBufferStatic.bshd");
+}
+
+TEST(candidates_empty_for_unknown_engine_shader) {
+    char c[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
+    ASSERT_EQ(shader_alias_candidates("Shaders/Metal/SomeOtherPass.bshd", c), 0);
 }
 
 TEST(candidates_never_returns_the_original_name) {
@@ -168,7 +175,8 @@ void register_shader_alias_tests(void) {
     RUN_TEST(base_root_ignores_public_as_a_name_fragment);
     RUN_TEST(candidates_for_mod_shipped_stock_material);
     RUN_TEST(candidates_for_clone_inside_mod_namespace);
-    RUN_TEST(candidates_empty_for_engine_shader_with_no_alias);
+    RUN_TEST(candidates_alias_instanced_velocity_to_plain);
+    RUN_TEST(candidates_empty_for_unknown_engine_shader);
     RUN_TEST(candidates_never_returns_the_original_name);
     RUN_TEST(candidates_tolerates_null);
     RUN_TEST(variant_parses_simple_suffix);

@@ -117,10 +117,51 @@ bool shader_alias_variant(const char *name, char *out, size_t out_size) {
     return true;
 }
 
+/* Engine shaders (Shaders/Metal/*.bshd) carry no mod namespace and no material
+ * UUID, so neither rewrite applies -- yet one of them must still resolve.
+ *
+ * VelocityBufferStaticInstanced is the fallback the engine reaches for when a
+ * material has no velocity shader of its own. This macOS build does not ship
+ * it: Core.metallib contains VelocityBufferStatic and VelocityBufferCamera and
+ * ZERO *StaticInstanced* symbols. So declining to alias a material's _VEL
+ * variant does not quietly skip motion vectors -- it routes the draw into a
+ * shader that does not exist, and the null pipeline bricks the game. Measured:
+ * this name missed 9 times in the run that skipped _VEL and 0 times in the run
+ * that aliased it.
+ *
+ * Substituting the non-instanced variant is not exact -- it is the same pass
+ * without per-instance transforms -- but the honest alternatives here are a
+ * null pipeline or nothing at all. Kept as an explicit table so each such
+ * substitution is a deliberate, reviewable entry rather than a rule that
+ * silently grows. */
+static const struct { const char *from, *to; } kEngineAliases[] = {
+    { "VelocityBufferStaticInstanced.bshd", "VelocityBufferStatic.bshd" },
+};
+
+static bool engine_alias(const char *name, char *out, size_t out_size) {
+    size_t len = strlen(name);
+    for (size_t i = 0; i < sizeof(kEngineAliases)/sizeof(kEngineAliases[0]); i++) {
+        size_t flen = strlen(kEngineAliases[i].from);
+        if (len < flen) continue;
+        if (memcmp(name + len - flen, kEngineAliases[i].from, flen) != 0) continue;
+
+        size_t head = len - flen;
+        size_t tlen = strlen(kEngineAliases[i].to);
+        if (head + tlen + 1 > out_size) return false;
+        memcpy(out, name, head);
+        memcpy(out + head, kEngineAliases[i].to, tlen + 1);
+        return true;
+    }
+    return false;
+}
+
 int shader_alias_candidates(const char *name,
                             char out[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX]) {
     int n = 0;
     if (!name) return 0;
+
+    /* 0. known engine-shader substitution */
+    if (engine_alias(name, out[n], PATH_MAX)) n++;
 
     /* 1. material-name clone, same namespace */
     if (shader_alias_strip_uuid(name, out[n], PATH_MAX)) n++;
