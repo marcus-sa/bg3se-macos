@@ -546,6 +546,7 @@ void resource_dump_type(ResourceBankType type, int max_count) {
 
 #include <stdlib.h>
 #include <stdio.h>
+#include "../template/template_manager.h"
 
 void resource_probe_tick(void) {
     static int s_state = 0;        /* 0 = unstarted, 1 = probing, 2 = done */
@@ -569,6 +570,14 @@ void resource_probe_tick(void) {
 
     log_message("[Resource] probe: scanning all %d bank indices "
                 "(after %d tick(s))", RESOURCE_TYPE_COUNT, s_attempts);
+    if (template_manager_ready()) {
+        for (int m = 0; m < TEMPLATE_MANAGER_COUNT; m++) {
+            log_message("[Resource]   templates[%d] count=%d", m,
+                        template_get_count((TemplateManagerType)m));
+        }
+    } else {
+        log_message("[Resource]   template manager NOT READY");
+    }
     for (int t = 0; t < RESOURCE_TYPE_COUNT; t++) {
         int c = resource_get_count((ResourceBankType)t);
         if (c > 0) {
@@ -602,8 +611,28 @@ void resource_probe_tick(void) {
                                           s_resource_type_names[t] : "?");
             }
         }
-        log_message("[Resource] probe %s -> %s", tok,
-                    hits[0] ? hits : "NOT FOUND IN ANY BANK");
+        /* Also ask the template manager. RootTemplates are not resources and
+         * will never appear in a bank, so "missing from every bank" says
+         * nothing about them -- but whether an item's RootTemplate resolved is
+         * exactly what decides if it renders its own mesh or falls back to the
+         * vanilla parent it declares with `using`. */
+        const char *tmpl = "n/a (template manager not ready)";
+        static const char *mgr_names[TEMPLATE_MANAGER_COUNT] = {
+            "GlobalBank", "Local", "Cache", "LocalCache"
+        };
+        char tbuf[128];
+        if (template_manager_ready()) {
+            tmpl = "NOT FOUND IN ANY TEMPLATE MANAGER";
+            for (int m = 0; m < TEMPLATE_MANAGER_COUNT; m++) {
+                if (template_get_by_guid((TemplateManagerType)m, tok)) {
+                    snprintf(tbuf, sizeof(tbuf), "FOUND in %s", mgr_names[m]);
+                    tmpl = tbuf;
+                    break;
+                }
+            }
+        }
+        log_message("[Resource] probe %s -> banks: %s | template: %s", tok,
+                    hits[0] ? hits : "none", tmpl);
     }
     s_state = 2;
 }
