@@ -155,6 +155,7 @@ typedef struct {
     uint16_t type_index;
     uint32_t event;             // ENTITY_EVENT_CREATE or DESTROY
     uint32_t sub_index;         // Subscription pool index
+    uint32_t queued_tick;       // Tick this was queued on (see fire_deferred)
 } DeferredEvent;
 
 // ============================================================================
@@ -176,6 +177,14 @@ static int g_hooked_capacity = 0;
 static DeferredEvent g_deferred[MAX_DEFERRED_EVENTS];
 static int g_deferred_count = 0;
 static bool g_deferred_overflow_warned = false;
+
+/* Counts main-thread flushes, so a deferred event can report how long it
+ * waited. Diagnosing "entity.Uuid is nil": upstream dispatches component
+ * events synchronously, with the entity guaranteed live; we always defer
+ * (lua_pcall off the main thread corrupts the stack), so by flush time the
+ * entity may be gone. Whether it IS gone -- versus our storage lookup being
+ * unable to reach it -- is what this measures. */
+static uint32_t g_tick = 0;
 
 // Deferred unsubscription queue
 static uint32_t g_deferred_unsubs[MAX_SUBSCRIPTIONS];
@@ -735,7 +744,8 @@ static void dispatch_event(lua_State *L, uint16_t type_index,
                 .entity = entity_handle,
                 .type_index = type_index,
                 .event = event,
-                .sub_index = packed
+                .sub_index = packed,
+                .queued_tick = g_tick
             };
         } else if (!g_deferred_overflow_warned) {
             g_deferred_overflow_warned = true;
@@ -1182,12 +1192,46 @@ void entity_events_fire_deferred(lua_State *L) {
         ComponentHook *hook = &g_hooks[idx];
         if (!hook->active) continue;
 
+        /* Does the entity still exist by the time we hand it to Lua? A CREATE
+         * whose entity is already gone is exactly the case that makes
+         * `entity.Uuid` nil and blows up mods written against upstream's
+         * synchronous dispatch. Also report whether this same batch carries a
+         * DESTROY for it: that distinguishes "it died between queue and flush"
+         * (deferral is the bug) from "we can never resolve this handle"
+         * (the storage lookup is). */
+        if (ev->event & ENTITY_EVENT_CREATE) {
+            bool alive = component_lookup_ready()
+                       && component_lookup_get_storage_data(ev->entity) != NULL;
+            if (!alive) {
+                bool destroyed_in_batch = false;
+                for (int j = 0; j < local_count; j++) {
+                    if (j != i && local_events[j].entity == ev->entity
+                        && (local_events[j].event & ENTITY_EVENT_DESTROY)) {
+                        destroyed_in_batch = true;
+                        break;
+                    }
+                }
+                const ComponentInfo *ci =
+                    component_registry_lookup_by_index(ev->type_index);
+                log_message("[EntityEvents] DEFERRED CREATE for dead entity "
+                            "0x%llx (idx=%u) component=%s waited=%u tick(s), "
+                            "destroy_in_same_batch=%d, batch=%d",
+                            (unsigned long long)ev->entity,
+                            (unsigned)(ev->entity & 0xFFFFFFFFu),
+                            ci ? ci->name : "?",
+                            g_tick - ev->queued_tick,
+                            destroyed_in_batch, local_count);
+            }
+        }
+
         call_lua_handler(L, hook, ev->entity, ev->type_index, ev->event, NULL);
 
         if (hook->flags & ENTITY_EVENT_FLAG_ONCE) {
             unsubscribe_by_packed(ev->sub_index, L);
         }
     }
+
+    g_tick++;
 
     // Process deferred unsubscriptions after events have fired
     for (int i = 0; i < g_deferred_unsub_count; i++) {
