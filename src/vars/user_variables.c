@@ -2,10 +2,13 @@
  * BG3SE-macOS - User Variables System Implementation
  *
  * Entity-attached custom variables with persistence.
- * Storage: ~/Library/Application Support/BG3SE/uservars.json
+ * Storage lives in vars_persist.c: one JSON store per savegame under
+ * ~/Library/Application Support/BG3SE/SaveVars/. This file owns the in-memory
+ * variable set and the payload it serializes to.
  */
 
 #include "user_variables.h"
+#include "vars_persist.h"
 #include "../lua/lua_json.h"
 #include "../core/logging.h"
 
@@ -38,36 +41,6 @@ static bool g_ModsDirty = false;
 
 static bool g_Initialized = false;
 static bool g_Dirty = false;
-
-// File paths for persistence
-static char g_PersistPath[PATH_MAX] = {0};
-static char g_ModPersistPath[PATH_MAX] = {0};
-
-// ============================================================================
-// Helper: Get persistence file path
-// ============================================================================
-
-static const char* get_persist_path(void) {
-    if (g_PersistPath[0] == '\0') {
-        const char *home = getenv("HOME");
-        if (home) {
-            snprintf(g_PersistPath, sizeof(g_PersistPath),
-                     "%s/Library/Application Support/BG3SE/uservars.json", home);
-        }
-    }
-    return g_PersistPath;
-}
-
-static const char* get_mod_persist_path(void) {
-    if (g_ModPersistPath[0] == '\0') {
-        const char *home = getenv("HOME");
-        if (home) {
-            snprintf(g_ModPersistPath, sizeof(g_ModPersistPath),
-                     "%s/Library/Application Support/BG3SE/modvars.json", home);
-        }
-    }
-    return g_ModPersistPath;
-}
 
 // ============================================================================
 // Helper: Free a UserVariable's allocated memory
@@ -168,6 +141,21 @@ static void varcache_remove(lua_State *L, const char *ck) {
     lua_pushnil(L);
     lua_setfield(L, -2, ck);
     lua_pop(L, 1);
+}
+
+/* Drop every cached table for this state.
+ *
+ * Loading a savegame replaces the whole variable set. mvar_get/uvar_get answer
+ * from this cache BEFORE they ever look at value.string, so a table cached
+ * while the previous savegame was loaded would shadow the restored value and
+ * the mod would keep reading (and mutating) the outgoing campaign's data. */
+static void varcache_reset(lua_State *L) {
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, VARCACHE_REGISTRY_KEY);
+}
+
+void uvar_cache_invalidate(lua_State *L) {
+    if (L) varcache_reset(L);
 }
 
 // ============================================================================
@@ -589,162 +577,185 @@ int uvar_get_entities_with_variable(lua_State *L, const char *key) {
 }
 
 // ============================================================================
-// Persistence
+// Savegame Store — in-memory half
 // ============================================================================
+//
+// Everything below builds or replaces the whole persistent variable set.
+// vars_persist.c decides WHICH savegame the set belongs to and WHEN it is
+// written; this file only knows how to turn the set into a Lua table and back.
 
-void uvar_save_all(lua_State *L) {
-    if (!g_Initialized || !g_Dirty) return;
+int uvar_store_build(lua_State *L) {
+    if (!g_Initialized) uvar_init();
 
-    const char *path = get_persist_path();
-    if (!path || path[0] == '\0') {
-        LOG_LUA_ERROR("No persist path for user variables");
-        return;
-    }
+    lua_newtable(L);
+    int root = lua_gettop(L);
 
-    // Build JSON structure
-    lua_newtable(L);  // Root table
-    int root_idx = lua_gettop(L);
+    lua_pushinteger(L, UVAR_STORE_VERSION);
+    lua_setfield(L, root, "version");
 
-    // Save prototypes
+    // Entity variable prototypes are global (one flag set per key), so they
+    // ride along and are re-registered on restore. Without them a value read
+    // back before its mod registers the key would land on auto-registered
+    // default flags and quietly lose, say, its client-side visibility.
     lua_newtable(L);
     for (int i = 0; i < g_PrototypeCount; i++) {
         if ((g_Prototypes[i].flags & UVAR_FLAG_PERSISTENT) == 0) continue;
-        lua_pushinteger(L, g_Prototypes[i].flags);
+        lua_pushinteger(L, (lua_Integer)g_Prototypes[i].flags);
         lua_setfield(L, -2, g_Prototypes[i].key);
     }
-    lua_setfield(L, root_idx, "_prototypes");
+    lua_setfield(L, root, "prototypes");
 
-    // Save entities
     lua_newtable(L);
-    int entities_idx = lua_gettop(L);
-
+    int entities = lua_gettop(L);
     for (int i = 0; i < g_EntityCount; i++) {
         EntityVariables *ent = &g_Entities[i];
         if (!ent->vars) continue;
 
-        lua_newtable(L);  // Entity vars table
-        int ent_idx = lua_gettop(L);
-        bool has_persistent = false;
+        lua_newtable(L);
+        int ent_t = lua_gettop(L);
+        bool any = false;
 
         for (int j = 0; j < ent->var_count && j < g_PrototypeCount; j++) {
             if ((g_Prototypes[j].flags & UVAR_FLAG_PERSISTENT) == 0) continue;
             if (ent->vars[j].type == UVAR_TYPE_NULL) continue;
 
-            has_persistent = true;
+            // Read through uvar_get on purpose: for a table it returns the
+            // CACHED object, so nested writes the mod made in place (which
+            // never set var->dirty) are what gets serialized.
             uvar_get(L, ent->guid, g_Prototypes[j].key);
-            lua_setfield(L, ent_idx, g_Prototypes[j].key);
+            if (lua_isnil(L, -1)) { lua_pop(L, 1); continue; }
+            lua_setfield(L, ent_t, g_Prototypes[j].key);
+            any = true;
         }
 
-        if (has_persistent) {
-            lua_setfield(L, entities_idx, ent->guid);
-        } else {
-            lua_pop(L, 1);  // Pop empty entity table
-        }
+        if (any) lua_setfield(L, entities, ent->guid);
+        else     lua_pop(L, 1);
     }
-    lua_setfield(L, root_idx, "entities");
+    lua_setfield(L, root, "entities");
 
-    // Stringify and write
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    json_stringify_value(L, root_idx, &b);
-    luaL_pushresult(&b);
+    lua_newtable(L);
+    int mods = lua_gettop(L);
+    for (int i = 0; i < g_ModCount; i++) {
+        ModVariables *mod = &g_Mods[i];
+        if (!mod->vars || !mod->prototypes) continue;
 
-    size_t json_len;
-    const char *json = lua_tolstring(L, -1, &json_len);
+        lua_newtable(L);
+        int vars_t = lua_gettop(L);
+        lua_newtable(L);
+        int flags_t = lua_gettop(L);
+        bool any = false;
 
-    // Atomic write
-    char temp_path[PATH_MAX];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+        for (int j = 0; j < mod->var_count && j < mod->prototype_count; j++) {
+            if ((mod->prototypes[j].flags & UVAR_FLAG_PERSISTENT) == 0) continue;
+            if (mod->vars[j].type == UVAR_TYPE_NULL) continue;
 
-    FILE *f = fopen(temp_path, "w");
-    if (f) {
-        fwrite(json, 1, json_len, f);
-        fclose(f);
-        if (rename(temp_path, path) == 0) {
-            LOG_LUA_INFO("Saved user variables: %zu bytes", json_len);
-            g_Dirty = false;
-        } else {
-            LOG_LUA_ERROR("Failed to rename temp file: %s", strerror(errno));
-            unlink(temp_path);
+            mvar_get(L, mod->uuid, mod->prototypes[j].key);
+            if (lua_isnil(L, -1)) { lua_pop(L, 1); continue; }
+            lua_setfield(L, vars_t, mod->prototypes[j].key);
+
+            lua_pushinteger(L, (lua_Integer)mod->prototypes[j].flags);
+            lua_setfield(L, flags_t, mod->prototypes[j].key);
+            any = true;
         }
-    } else {
-        LOG_LUA_ERROR("Failed to create temp file: %s", strerror(errno));
-    }
 
-    lua_pop(L, 2);  // Pop JSON string and root table
+        if (any) {
+            lua_newtable(L);
+            lua_pushvalue(L, flags_t);
+            lua_setfield(L, -2, "flags");
+            lua_pushvalue(L, vars_t);
+            lua_setfield(L, -2, "vars");
+            lua_setfield(L, mods, mod->uuid);
+        }
+        lua_pop(L, 2);  // flags_t, vars_t
+    }
+    lua_setfield(L, root, "mods");
+
+    return 1;
 }
 
-void uvar_load_all(lua_State *L) {
+void uvar_store_clear(lua_State *L) {
     if (!g_Initialized) uvar_init();
 
-    const char *path = get_persist_path();
-    if (!path || path[0] == '\0') return;
+    for (int i = 0; i < g_EntityCount; i++) {
+        EntityVariables *ent = &g_Entities[i];
+        if (!ent->vars) continue;
+        for (int j = 0; j < ent->var_count; j++) {
+            free_variable(&ent->vars[j]);
+        }
+        free(ent->vars);
+        ent->vars = NULL;
+        ent->var_count = 0;
+    }
+    // Entity slots are per-savegame; reusing them across loads would burn
+    // through UVAR_MAX_ENTITIES with GUIDs the new savegame never mentions.
+    memset(g_Entities, 0, sizeof(g_Entities));
+    g_EntityCount = 0;
 
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        LOG_LUA_INFO("No user variables file to load");
-        return;
+    // Mod slots are NOT reset: prototypes are registered once at bootstrap by
+    // RegisterModVariable, and dropping them here would leave every later
+    // mvar_set auto-registering with default flags instead.
+    for (int i = 0; i < g_ModCount; i++) {
+        ModVariables *mod = &g_Mods[i];
+        if (!mod->vars) continue;
+        for (int j = 0; j < mod->var_count; j++) {
+            free_variable(&mod->vars[j]);
+        }
+        free(mod->vars);
+        mod->vars = NULL;
+        mod->var_count = 0;
+        mod->dirty = false;
     }
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    g_Dirty = false;
+    g_ModsDirty = false;
 
-    if (size <= 0 || size > 10 * 1024 * 1024) {
-        fclose(f);
-        return;
-    }
+    varcache_reset(L);
+}
 
-    char *json = malloc(size + 1);
-    if (!json) {
-        fclose(f);
-        return;
-    }
+/* lua_next requires the key it hands back to stay a string; lua_tostring on a
+ * numeric key would rewrite that slot in place and corrupt the traversal. */
+static bool store_copy_key(lua_State *L, int key_index, char *out, size_t n) {
+    if (lua_type(L, key_index) != LUA_TSTRING) return false;
+    size_t len = 0;
+    const char *k = lua_tolstring(L, key_index, &len);
+    if (!k || len == 0 || len >= n) return false;
+    memcpy(out, k, len);
+    out[len] = '\0';
+    return true;
+}
 
-    size_t read_size = fread(json, 1, size, f);
-    fclose(f);
-    json[read_size] = '\0';
+void uvar_store_apply(lua_State *L, int root_idx) {
+    if (!g_Initialized) uvar_init();
+    if (root_idx < 0) root_idx = lua_gettop(L) + root_idx + 1;
 
-    // Parse JSON
-    const char *end = json_parse_value(L, json);
-    if (!end || !lua_istable(L, -1)) {
-        LOG_LUA_ERROR("Failed to parse user variables JSON");
-        free(json);
-        if (lua_gettop(L) > 0) lua_pop(L, 1);
-        return;
-    }
-    int root_idx = lua_gettop(L);
+    uvar_store_clear(L);
 
-    // Load prototypes
-    lua_getfield(L, root_idx, "_prototypes");
+    lua_getfield(L, root_idx, "prototypes");
     if (lua_istable(L, -1)) {
+        int t = lua_gettop(L);
         lua_pushnil(L);
-        while (lua_next(L, -2) != 0) {
-            if (lua_isstring(L, -2) && lua_isinteger(L, -1)) {
-                const char *key = lua_tostring(L, -2);
-                uint32_t flags = (uint32_t)lua_tointeger(L, -1);
-                uvar_register_prototype(key, flags);
+        while (lua_next(L, t) != 0) {
+            char key[UVAR_MAX_KEY_LENGTH];
+            if (store_copy_key(L, -2, key, sizeof(key)) && lua_isinteger(L, -1)) {
+                uvar_register_prototype(key, (uint32_t)lua_tointeger(L, -1));
             }
             lua_pop(L, 1);
         }
     }
-    lua_pop(L, 1);  // Pop _prototypes
+    lua_pop(L, 1);
 
-    // Load entities
     lua_getfield(L, root_idx, "entities");
     if (lua_istable(L, -1)) {
-        int entities_idx = lua_gettop(L);
+        int ents = lua_gettop(L);
         lua_pushnil(L);
-        while (lua_next(L, entities_idx) != 0) {
-            if (lua_isstring(L, -2) && lua_istable(L, -1)) {
-                const char *guid = lua_tostring(L, -2);
-                int ent_vars_idx = lua_gettop(L);
-
-                // Iterate entity variables
+        while (lua_next(L, ents) != 0) {
+            char guid[UVAR_GUID_LENGTH];
+            if (store_copy_key(L, -2, guid, sizeof(guid)) && lua_istable(L, -1)) {
+                int vars_t = lua_gettop(L);
                 lua_pushnil(L);
-                while (lua_next(L, ent_vars_idx) != 0) {
-                    if (lua_isstring(L, -2)) {
-                        const char *key = lua_tostring(L, -2);
+                while (lua_next(L, vars_t) != 0) {
+                    char key[UVAR_MAX_KEY_LENGTH];
+                    if (store_copy_key(L, -2, key, sizeof(key))) {
                         uvar_set(L, guid, 0, key, lua_gettop(L));
                     }
                     lua_pop(L, 1);
@@ -753,19 +764,59 @@ void uvar_load_all(lua_State *L) {
             lua_pop(L, 1);
         }
     }
-    lua_pop(L, 1);  // Pop entities
+    lua_pop(L, 1);
 
-    lua_pop(L, 1);  // Pop root table
-    free(json);
+    lua_getfield(L, root_idx, "mods");
+    if (lua_istable(L, -1)) {
+        int mods = lua_gettop(L);
+        lua_pushnil(L);
+        while (lua_next(L, mods) != 0) {
+            char uuid[UVAR_GUID_LENGTH];
+            if (store_copy_key(L, -2, uuid, sizeof(uuid)) && lua_istable(L, -1)) {
+                int entry = lua_gettop(L);
 
-    g_Dirty = false;
-    LOG_LUA_INFO("Loaded user variables");
-}
+                // Flags first: mvar_set auto-registers a missing prototype with
+                // defaults, and a default-registered key would then be stuck
+                // with those flags for the rest of the session.
+                lua_getfield(L, entry, "flags");
+                if (lua_istable(L, -1)) {
+                    int flags_t = lua_gettop(L);
+                    lua_pushnil(L);
+                    while (lua_next(L, flags_t) != 0) {
+                        char key[UVAR_MAX_KEY_LENGTH];
+                        if (store_copy_key(L, -2, key, sizeof(key)) && lua_isinteger(L, -1)) {
+                            mvar_register_prototype(uuid, key,
+                                                    (uint32_t)lua_tointeger(L, -1));
+                        }
+                        lua_pop(L, 1);
+                    }
+                }
+                lua_pop(L, 1);
 
-void uvar_flush(lua_State *L) {
-    if (g_Dirty) {
-        uvar_save_all(L);
+                lua_getfield(L, entry, "vars");
+                if (lua_istable(L, -1)) {
+                    int vars_t = lua_gettop(L);
+                    lua_pushnil(L);
+                    while (lua_next(L, vars_t) != 0) {
+                        char key[UVAR_MAX_KEY_LENGTH];
+                        if (store_copy_key(L, -2, key, sizeof(key))) {
+                            mvar_set(L, uuid, key, lua_gettop(L));
+                        }
+                        lua_pop(L, 1);
+                    }
+                }
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
     }
+    lua_pop(L, 1);
+
+    // A restore is not a mod write: leaving the dirty flags set would make the
+    // very next flush rewrite the store it just read.
+    g_Dirty = false;
+    g_ModsDirty = false;
+    for (int i = 0; i < g_ModCount; i++) g_Mods[i].dirty = false;
 }
 
 // ============================================================================
@@ -950,7 +1001,10 @@ static int lua_get_entities_with_variable(lua_State *L) {
 // ============================================================================
 
 static int lua_sync_user_variables(lua_State *L) {
-    uvar_save_all(L);
+    // Windows uses this to push variables to peers; here it is also the mod's
+    // explicit "write now". The tick flush already persists without it — no
+    // mod may be relied on to call this — so it only shortens the window.
+    vars_persist_flush_now(L);
     return 0;
 }
 
@@ -1272,145 +1326,6 @@ void mvar_mark_dirty(const char *mod_uuid, const char *key) {
     g_ModsDirty = true;
 }
 
-void mvar_save_all(lua_State *L) {
-    if (!g_Initialized || !g_ModsDirty) return;
-
-    const char *path = get_mod_persist_path();
-    if (!path || path[0] == '\0') {
-        LOG_LUA_ERROR("No persist path for mod variables");
-        return;
-    }
-
-    // Build JSON structure
-    lua_newtable(L);
-    int root_idx = lua_gettop(L);
-
-    for (int i = 0; i < g_ModCount; i++) {
-        ModVariables *mod = &g_Mods[i];
-        if (!mod->vars || !mod->prototypes) continue;
-
-        lua_newtable(L);
-        int mod_idx = lua_gettop(L);
-        bool has_persistent = false;
-
-        for (int j = 0; j < mod->var_count && j < mod->prototype_count; j++) {
-            if ((mod->prototypes[j].flags & UVAR_FLAG_PERSISTENT) == 0) continue;
-            if (mod->vars[j].type == UVAR_TYPE_NULL) continue;
-
-            has_persistent = true;
-            mvar_get(L, mod->uuid, mod->prototypes[j].key);
-            lua_setfield(L, mod_idx, mod->prototypes[j].key);
-        }
-
-        if (has_persistent) {
-            lua_setfield(L, root_idx, mod->uuid);
-        } else {
-            lua_pop(L, 1);
-        }
-    }
-
-    // Stringify and write
-    luaL_Buffer b;
-    luaL_buffinit(L, &b);
-    json_stringify_value(L, root_idx, &b);
-    luaL_pushresult(&b);
-
-    size_t json_len;
-    const char *json = lua_tolstring(L, -1, &json_len);
-
-    // Atomic write
-    char temp_path[PATH_MAX];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-
-    FILE *f = fopen(temp_path, "w");
-    if (f) {
-        fwrite(json, 1, json_len, f);
-        fclose(f);
-        if (rename(temp_path, path) == 0) {
-            LOG_LUA_INFO("Saved mod variables: %zu bytes", json_len);
-            g_ModsDirty = false;
-            for (int i = 0; i < g_ModCount; i++) {
-                g_Mods[i].dirty = false;
-            }
-        } else {
-            LOG_LUA_ERROR("Failed to rename temp file: %s", strerror(errno));
-            unlink(temp_path);
-        }
-    } else {
-        LOG_LUA_ERROR("Failed to create temp file: %s", strerror(errno));
-    }
-
-    lua_pop(L, 2);  // Pop JSON string and root table
-}
-
-void mvar_load_all(lua_State *L) {
-    if (!g_Initialized) uvar_init();
-
-    const char *path = get_mod_persist_path();
-    if (!path || path[0] == '\0') return;
-
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        LOG_LUA_INFO("No mod variables file to load");
-        return;
-    }
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (size <= 0 || size > 10 * 1024 * 1024) {
-        fclose(f);
-        return;
-    }
-
-    char *json = malloc(size + 1);
-    if (!json) {
-        fclose(f);
-        return;
-    }
-
-    size_t read_size = fread(json, 1, size, f);
-    fclose(f);
-    json[read_size] = '\0';
-
-    // Parse JSON
-    const char *end = json_parse_value(L, json);
-    if (!end || !lua_istable(L, -1)) {
-        LOG_LUA_ERROR("Failed to parse mod variables JSON");
-        free(json);
-        if (lua_gettop(L) > 0) lua_pop(L, 1);
-        return;
-    }
-    int root_idx = lua_gettop(L);
-
-    // Iterate mods
-    lua_pushnil(L);
-    while (lua_next(L, root_idx) != 0) {
-        if (lua_isstring(L, -2) && lua_istable(L, -1)) {
-            const char *mod_uuid = lua_tostring(L, -2);
-            int mod_vars_idx = lua_gettop(L);
-
-            // Iterate mod variables
-            lua_pushnil(L);
-            while (lua_next(L, mod_vars_idx) != 0) {
-                if (lua_isstring(L, -2)) {
-                    const char *key = lua_tostring(L, -2);
-                    mvar_set(L, mod_uuid, key, lua_gettop(L));
-                }
-                lua_pop(L, 1);
-            }
-        }
-        lua_pop(L, 1);
-    }
-
-    lua_pop(L, 1);  // Pop root table
-    free(json);
-
-    g_ModsDirty = false;
-    LOG_LUA_INFO("Loaded mod variables");
-}
-
 // ============================================================================
 // Mod Variables Proxy Metatable
 // ============================================================================
@@ -1549,7 +1464,7 @@ static int lua_get_mod_variables(lua_State *L) {
 // ============================================================================
 
 static int lua_sync_mod_variables(lua_State *L) {
-    mvar_save_all(L);
+    vars_persist_flush_now(L);
     return 0;
 }
 

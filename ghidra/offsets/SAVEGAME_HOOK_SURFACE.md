@@ -364,3 +364,43 @@ repeatably, with non-null visitors, successful safe reads, normal original
 returns, and no crash/log regression. A missing direction, unreadable visitor,
 failed byte/hook gate, or regression is **no-go** until investigated; write-only
 observation does not pass the gate.
+
+## Re-verification on 4.1.1.7398727 (2026-09-02)
+
+The recon above was recorded against 4.1.1.7209685. Every symbol it names still
+resolves to the **same preferred VA** on the shipped 4.1.1.7398727 arm64 slice
+(`CFBundleShortVersionString` from `Contents/Info.plist`; symbols from
+`nm -arch arm64 -n … | c++filt` over `Baldur's Gate 3.bg3se-original`):
+
+| Symbol | Preferred VA | 7209685 | 7398727 |
+|---|---:|---|---|
+| `esv::OsirisVariableHelper::SavegameVisit(eoc::SavegameVisitor*)` | `0x104b51a9c` | ✓ | ✓ |
+| `esv::LoadProtocol::LoadSavegame(ls::STDString const&, ls::ModuleSettings const*)` | `0x104aef950` | ✓ | ✓ |
+| `esv::SaveSystem::DoSaveFlow(...)` | `0x104d2af00` | ✓ | ✓ |
+| `esv::SessionLoadSystem::Update(...)` | `0x104d897b0` | ✓ | ✓ |
+| `ecl::SavegameManager::SaveGame(ls::STDString const&, eoc::ESaveGameType, int, ls::ScratchBuffer const*)` | `0x10312681c` | ✓ | ✓ |
+| `ecl::SavegameManager::LoadGame(ls::STDString const&, ls::ModuleSettings const*)` | `0x103125f20` | ✓ | ✓ |
+
+The prologue gate in `src/game/savegame_hook.c` also still matches. Read at fat
+offset `0x140a9a9c` (`0x0f558000 + 0x04b51a9c`) the first 16 bytes of the rank-1
+seam are, byte for byte, `s_expected_prologue`:
+
+```text
+ff 03 01 d1   sub  sp, sp, #0x40
+f6 57 01 a9   stp  x22, x21, [sp, #0x10]
+f4 4f 02 a9   stp  x20, x19, [sp, #0x20]
+fd 7b 03 a9   stp  x29, x30, [sp, #0x30]
+```
+
+**This changes the static verdict for this build, not the runtime gate.** The
+E1.1 gate above still demands repeatable observation of both directions on
+disposable saves, and that has not been performed on 7398727. `savegame_hook.c`
+also still names 7209685 in `SAVEGAME_HOOK_VERIFIED_BUILD`, so it stays
+disarmed here.
+
+Independently of the gate, the *writer* is a poor place to serialize Ext.Vars in
+this port: it is reached from `esv::SaveSystem::DoSaveFlow`, which runs as a
+worker-thread job, so serializing variables there means entering the server
+`lua_State` off the game thread. `src/vars/vars_persist.c` therefore persists a
+sidecar store from the Osiris event thread under the Lua gate instead, and
+documents there how it identifies the savegame without this hook.

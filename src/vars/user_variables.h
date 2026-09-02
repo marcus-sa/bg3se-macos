@@ -179,20 +179,45 @@ void uvar_mark_dirty(const char *guid, const char *key);
  */
 int uvar_get_entities_with_variable(lua_State *L, const char *key);
 
-/**
- * Save all persistent variables to JSON file.
- */
-void uvar_save_all(lua_State *L);
+// ============================================================================
+// Savegame Store
+// ============================================================================
+//
+// The variable set belongs to a savegame, not to the installation: two
+// playthroughs must not see each other's data. user_variables.c owns the
+// in-memory half (build a payload, replace the payload) and vars_persist.c
+// owns the file half (which savegame, when to write). Keeping the split here
+// means the store format is testable without a game.
+
+#define UVAR_STORE_VERSION 1
 
 /**
- * Load all persistent variables from JSON file.
+ * Push a table holding every persistent variable, ready to be stringified.
+ * Table-valued variables are read back through uvar_get/mvar_get, so an
+ * in-place mutation of a cached table is captured even though it never set a
+ * dirty flag. Returns 1 (one value pushed).
  */
-void uvar_load_all(lua_State *L);
+int uvar_store_build(lua_State *L);
 
 /**
- * Flush dirty variables (called on tick).
+ * Drop every variable value and every cached table for this Lua state.
+ * Prototypes survive: mods register those at bootstrap, not per savegame.
  */
-void uvar_flush(lua_State *L);
+void uvar_store_clear(lua_State *L);
+
+/**
+ * Replace all variable state with the payload at root_idx (as built by
+ * uvar_store_build). Clears first, so a value absent from the payload cannot
+ * survive from the previously loaded savegame.
+ */
+void uvar_store_apply(lua_State *L, int root_idx);
+
+/**
+ * Drop the identity cache for this Lua state without touching values.
+ * Needed for the client state after a server-side restore: its cached tables
+ * were deserialized from the outgoing savegame's JSON.
+ */
+void uvar_cache_invalidate(lua_State *L);
 
 // ============================================================================
 // Mod Variables API
@@ -229,16 +254,6 @@ int mvar_get(lua_State *L, const char *mod_uuid, const char *key);
  * Mark mod variables as dirty.
  */
 void mvar_mark_dirty(const char *mod_uuid, const char *key);
-
-/**
- * Save all mod variables.
- */
-void mvar_save_all(lua_State *L);
-
-/**
- * Load all mod variables.
- */
-void mvar_load_all(lua_State *L);
 
 /**
  * Push mod variables proxy for GetModVariables().

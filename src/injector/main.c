@@ -102,6 +102,7 @@ extern "C" {
 
 // User Variables (entity.Vars)
 #include "user_variables.h"
+#include "vars_persist.h"
 
 // Event system
 #include "lua_events.h"
@@ -1034,9 +1035,11 @@ static void register_ext_api(lua_State *L) {
     lua_getfield(L, -1, "Vars");  // Get Ext.Vars table
     if (lua_istable(L, -1)) {
         uvar_register_lua(L, -1);
-        // Load persisted variables
-        uvar_load_all(L);
-        mvar_load_all(L);
+        // Deliberately no load here: at Ext-registration time no savegame is
+        // loaded yet, so there is nothing to key a store to. Restoring happens
+        // in fake_Event on SavegameLoaded (vars_persist_on_savegame_loaded),
+        // which is the first point where the savegame is identifiable AND
+        // still before any mod callback reads Ext.Vars.
     }
     lua_pop(L, 1);  // Pop Ext.Vars
 
@@ -4312,6 +4315,13 @@ static int fake_Load(void *thisPtr, void *smartBuf) {
     lua_gate_lock();
     lua_State *L = lua_runtime_server()->L;
     if (L && result) {
+        // A story load separates two campaigns. Ext.Vars must let go of the
+        // savegame it was persisting to here, before mod bootstrap re-runs and
+        // before SavegameLoaded picks the incoming save — otherwise "New Game"
+        // straight after a session inherits that session's variables, and the
+        // tick keeps writing them into the savegame the player just left.
+        vars_persist_on_session_begin(L);
+
         game_state_on_session_loading(L);
         luaL_dostring(L, "Ext.Print('Story/save data loaded!')");
 
@@ -4788,6 +4798,7 @@ static bool fake_Event(void *thisPtr, uint32_t funcId, OsiArgumentDesc *args) {
         timer_update(L);  // Process timer callbacks
         timer_update_persistent(L);  // Process persistent timer callbacks
         persist_tick(L);  // Check for dirty PersistentVars to auto-save
+        vars_persist_tick(L);  // Adopt new savegames, write Ext.Vars when changed
 
         // Fire Tick event with delta time
         double now = timer_get_monotonic_ms();
@@ -4992,6 +5003,33 @@ after_tick:
         osi_func_enumerate_by_name();
         osi_string_selftest();
         osi_report_node_classes();
+    }
+
+    // Ext.Vars restore. Same window as the name-index walk and for the same
+    // reason: the story is loaded, so the savegame is on disk and identifiable,
+    // and we are still ahead of every "before"/"after" Lua callback below —
+    // AppearanceEditEnhanced reads Vars.SpellOwners from CharacterJoinedParty,
+    // which cannot fire before this returns. LevelGameplayStarted only opens
+    // the session (a brand-new campaign has no store to read).
+    if (funcName && (strcmp(funcName, "SavegameLoaded") == 0 ||
+                     strcmp(funcName, "LevelGameplayStarted") == 0)) {
+        bool from_savegame = strcmp(funcName, "SavegameLoaded") == 0;
+        lua_gate_lock();
+        lua_State *varsL = lua_runtime_server()->L;
+        if (varsL) {
+            if (from_savegame) vars_persist_on_savegame_loaded(varsL);
+            else               vars_persist_on_level_started(varsL);
+
+            // The client state cached its own deserialized copies of any table
+            // variable it read; those objects describe the savegame we just
+            // left, and mvar_get answers from the cache before it looks at the
+            // stored JSON.
+            LuaRuntime *client = lua_runtime_client();
+            if (client && client->L && client->L != varsL) {
+                uvar_cache_invalidate(client->L);
+            }
+        }
+        lua_gate_unlock();
     }
 
     // Osiris events are server-side. After bootstrap, the context is left at
@@ -5682,6 +5720,10 @@ static void bg3se_init(void) {
 
     // Initialize crash-resilient logging (mmap ring buffer + signal handler)
     crashlog_init();
+
+    // Stamp the process start time before the game can touch a savegame: the
+    // Ext.Vars savegame resolver only trusts save files read after this point.
+    vars_persist_init();
 
     LOG_CORE_INFO("=== %s v%s initialized ===", BG3SE_NAME, BG3SE_VERSION);
     LOG_CORE_INFO("Running in process: %s (PID: %d)", getprogname(), getpid());

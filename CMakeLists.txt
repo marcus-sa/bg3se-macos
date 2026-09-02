@@ -222,6 +222,7 @@ add_library(bg3se SHARED
     src/math/lua_math.c
     src/overlay/overlay.m
     src/vars/user_variables.c
+    src/vars/vars_persist.c
     src/lifetime/lifetime.c
     src/localization/localization.c
     src/lua/lua_localization.c
@@ -388,6 +389,7 @@ if(BUILD_TESTS)
         tests/tier0/test_lua_runtime.c
         tests/tier0/test_guid_lookup.c
         tests/tier0/test_user_variables.c
+        tests/tier0/test_vars_persist.c
         tests/tier0/test_deal_damage_abi.c
         tests/tier0/test_spell_meta_layout.c
         tests/tier0/stub_logging.c
@@ -399,6 +401,7 @@ if(BUILD_TESTS)
         src/lua/lua_context.c
         src/lua/lua_json.c
         src/vars/user_variables.c
+        src/vars/vars_persist.c
         src/enum/enum_registry.c
         src/enum/enum_definitions.c
     )
