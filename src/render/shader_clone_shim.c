@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdio.h>
 
 // ls::ShaderManager::GetShader(FixedString const&) — local symbol, exact-build
 // address (4.1.1.7398727). Returns a 64-bit ShaderID; a miss returns the
@@ -50,6 +51,32 @@ typedef uint64_t (*GetShaderFn)(void *mgr, const uint32_t *name_fs);
 static GetShaderFn s_orig = NULL;
 static bool s_installed = false;
 
+/* How hard to try on a miss. Namespace rewriting is newer and far broader than
+ * the original UUID strip -- one DemonHunter session aliased 132 distinct
+ * materials -- so it gets a switch. Every offline check says the rewrite is
+ * exact (clone .bshd files are byte-identical to the plain one, and every
+ * alias preserves material name and category), but a wrong shader shows up as
+ * GPU garbage, and GPU garbage on this platform has already taken down
+ * WindowServer once. BG3SE_SHADER_ALIAS=uuid restores the pre-rewrite
+ * behaviour; =off disables aliasing entirely. */
+typedef enum {
+    ALIAS_OFF = 0,   /* never substitute; log the miss */
+    ALIAS_UUID,      /* material-name clones only, same namespace */
+    ALIAS_FULL       /* + Public/<mod>/ -> Public/Shared/ rewriting */
+} AliasMode;
+
+static AliasMode s_mode = ALIAS_FULL;
+
+static void alias_mode_init(void) {
+    const char *e = getenv("BG3SE_SHADER_ALIAS");
+    if (!e || !*e) return;
+    if (strcmp(e, "off") == 0)       s_mode = ALIAS_OFF;
+    else if (strcmp(e, "uuid") == 0) s_mode = ALIAS_UUID;
+    else if (strcmp(e, "full") == 0) s_mode = ALIAS_FULL;
+    else LOG_CORE_INFO("ShaderCloneShim: unknown BG3SE_SHADER_ALIAS='%s' "
+                       "(want off|uuid|full); keeping full", e);
+}
+
 /* Cold path only. Kept out of fake_GetShader so the hot path -- every shader
  * lookup the engine makes, on its render and worker threads -- does not
  * reserve the candidate buffers. Inlined, the 3 x PATH_MAX of scratch here
@@ -60,7 +87,13 @@ static bool s_installed = false;
 __attribute__((noinline))
 static uint64_t resolve_alias(void *mgr, const char *name) {
     char cands[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
-    int n = shader_alias_candidates(name, cands);
+    int n = 0;
+
+    if (s_mode == ALIAS_FULL) {
+        n = shader_alias_candidates(name, cands);
+    } else if (s_mode == ALIAS_UUID) {
+        if (shader_alias_strip_uuid(name, cands[0], PATH_MAX)) n = 1;
+    }
 
     for (int i = 0; i < n; i++) {
         uint32_t base_fs = fixed_string_intern(cands[i], -1);
@@ -119,8 +152,11 @@ bool shader_clone_shim_init(void *binary_base) {
         return false;
     }
 
+    alias_mode_init();
     s_installed = true;
-    LOG_CORE_INFO("ShaderCloneShim: clone-named shader lookups now fall back "
-                  "to their base shader");
+    LOG_CORE_INFO("ShaderCloneShim: installed (mode=%s)",
+                  s_mode == ALIAS_OFF  ? "off"
+                : s_mode == ALIAS_UUID ? "uuid (material-name clones only)"
+                                       : "full (clones + mod-namespace rewrite)");
     return true;
 }
