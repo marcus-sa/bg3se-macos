@@ -25,6 +25,7 @@
 #include "../lifetime/lifetime.h"
 #include "../strings/fixed_string.h"
 #include "../enum/enum_registry.h"
+#include "component_aliases.h"
 #include "guid_lookup.h"
 #include "spell_meta_layout.h"
 
@@ -156,6 +157,18 @@ const ComponentLayoutDef *component_property_get_layout_by_short_name(const char
             strcmp(g_Layouts[i].shortName, shortName) == 0) {
             return &g_Layouts[i];
         }
+    }
+
+    // The generated layouts carry a shortName derived from the engine class
+    // name, which is not always the name a mod writes: BG3SE calls
+    // eoc::spell::AddedSpellsComponent "AddedSpells", while the generated
+    // shortName here is "AddedSpellsComponent". Fall back to the BG3SE alias
+    // table so entity.AddedSpells reaches the same layout as
+    // entity.AddedSpellsComponent. Only reached after the direct match fails,
+    // so no existing name changes meaning.
+    const char *engineName = component_alias_lookup(shortName);
+    if (engineName) {
+        return component_property_get_layout(engineName);
     }
     return NULL;
 }

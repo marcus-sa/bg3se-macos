@@ -14,6 +14,7 @@
  */
 
 #include "entity_events.h"
+#include "component_aliases.h"
 #include "component_registry.h"
 #include "entity_system.h"
 #include "component_lookup.h"
@@ -1290,6 +1291,27 @@ static uint16_t resolve_component_type(lua_State *L, int arg_index) {
     const ComponentInfo *info = component_registry_lookup(name);
     if (info && info->index != COMPONENT_INDEX_UNDEFINED) {
         return info->index;
+    }
+
+    // Explicit short-name table before any probing. The probe below can only
+    // reach components whose engine name is <outer namespace> + <short name>,
+    // so it can never reach esv::combat::JoinEventOneFrameComponent from
+    // "CombatantJoinEvent": neither the inner namespace nor the OneFrame infix
+    // is recoverable from the short name. Expansion subscribes to that
+    // component at file scope in BootstrapServer.lua, so the raised "Unknown
+    // component type" aborted the whole chunk and every registration after that
+    // line silently never ran.
+    // The table is also the authority where the probe would answer but answer
+    // wrongly: Windows binds "Level" to ls::LevelComponent (eoc::LevelComponent
+    // is "EocLevel") while the probe reaches eoc:: first.
+    const char *aliased = component_alias_lookup(name);
+    if (aliased) {
+        info = component_registry_lookup(aliased);
+        if (info && info->index != COMPONENT_INDEX_UNDEFINED) {
+            return info->index;
+        }
+        // Fall through rather than fail: an alias whose target this build does
+        // not register must not be worse than having no alias at all.
     }
 
     // Guard against names too long for probing. Longest expansion is

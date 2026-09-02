@@ -26,6 +26,8 @@ Reverse-engineered offset documentation from Ghidra analysis of the BG3 macOS bi
 | [COMPONENT_DATABASE.md](COMPONENT_DATABASE.md) | Component size database |
 | [COMPONENT_SIZES.md](COMPONENT_SIZES.md) | Size extraction results |
 | [SIGNAL_INTEGRATION.md](SIGNAL_INTEGRATION.md) | Entity event signal hooks |
+| [COMPONENT_NAME_ALIASES.md](COMPONENT_NAME_ALIASES.md) | BG3SE short component name -> engine class name table; why prefix probing cannot reach inner-namespace/OneFrame components (7398727) |
+| [ADDED_SPELLS_COMPONENT.md](ADDED_SPELLS_COMPONENT.md) | eoc::spell::AddedSpellsComponent is DynamicArray<SpellMeta> at +0x00, sizeof 0x10, confirmed from the ECS destructor thunk (7398727) |
 | `components/` | Per-namespace component docs |
 
 ## Game Systems

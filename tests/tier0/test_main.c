@@ -23,6 +23,8 @@ void register_user_variables_tests(void);
 void register_vars_persist_tests(void);
 void register_deal_damage_abi_tests(void);
 void register_spell_meta_layout_tests(void);
+void register_component_alias_tests(void);
+void register_component_offsets_spell_tests(void);
 
 int main(void) {
     printf("=== BG3SE Tier 0 Unit Tests ===\n\n");
@@ -41,6 +43,8 @@ int main(void) {
     register_vars_persist_tests();
     register_deal_damage_abi_tests();
     register_spell_meta_layout_tests();
+    register_component_alias_tests();
+    register_component_offsets_spell_tests();
 
     printf("\n=== Results: %d/%d passed, %d failed ===\n",
            g_passed, g_passed + g_failed, g_failed);

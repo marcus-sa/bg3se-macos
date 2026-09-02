@@ -4254,9 +4254,30 @@ static const ComponentLayoutDef g_eoc_PickUpRequestComponent_Layout = {
 };
 
 // eoc::spell::AddedSpellsComponent - 16 bytes (0x10)
-// Source: AddedSpellsComponent from Windows BG3SE
+// Array<SpellMeta> Spells at 0x00 — the same element type and stride as
+// SpellContainer.Spells, confirmed on 7398727 arm64 rather than assumed from
+// the shared Windows declaration:
+//
+//   ecs::_private::GetComponentDestructor<eoc::spell::AddedSpellsComponent>
+//     @ 0x101f6f9d8 is one instruction:
+//       b  0x1019d8f64  ; ls::DynamicArray<eoc::spell::SpellMeta,
+//                       ;   ls::TaggedAllocator<int>>::~DynamicArray()
+//     x0 is passed through unadjusted, so the array sits at +0x00 and is the
+//     only member the component owns.
+//   The already-decoded eoc::spell::ContainerComponent has the identical
+//   destructor (b to the same ~DynamicArray<SpellMeta>), and
+//   eoc::spell::BookComponent instead does `add x0, x0, #0x8` then branches to
+//   ~DynamicArray<SpellData> — so this test discriminates both the offset and
+//   the element type, it does not just match everything spell-shaped.
+//   sizeof is 0x10: ImmediateWorldCache::AddComponent<AddedSpellsComponent>
+//     @ 0x101f70128 passes `mov w1, #0x10` to ComponentFrameStorageAllocRaw.
+//   Stride 0x60 for SpellMeta: see spell_meta_layout.h.
+//
+// This read elemType 0 / elemSize 0 until 2026-09, which routes to the generic
+// stub branch in component_property.c — every element came back as a table of
+// __ptr/__index/__size and `spell.SpellId` was nil.
 static const ComponentPropertyDef g_eoc_AddedSpellsComponent_Properties[] = {
-    { "Spells", 0x00, FIELD_TYPE_DYNAMIC_ARRAY, 0, false },
+    { "Spells", 0x00, FIELD_TYPE_DYNAMIC_ARRAY, 0, false, ELEM_TYPE_SPELL_META, SPELL_META_SIZE },
 };
 static const ComponentLayoutDef g_eoc_AddedSpellsComponent_Layout = {
     .componentName = "eoc::spell::AddedSpellsComponent",
