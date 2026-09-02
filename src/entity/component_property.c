@@ -468,16 +468,19 @@ int component_property_read_def(lua_State *L, void *componentPtr,
         }
 
         case FIELD_TYPE_GUID: {
-            // GUID is 16 bytes, format as string
-            uint8_t guid[16] = {0};
-            if (safe_memory_read((mach_vm_address_t)addr, guid, 16)) {
-                char buf[64];
-                snprintf(buf, sizeof(buf),
-                        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                        guid[0], guid[1], guid[2], guid[3],
-                        guid[4], guid[5], guid[6], guid[7],
-                        guid[8], guid[9], guid[10], guid[11],
-                        guid[12], guid[13], guid[14], guid[15]);
+            // Format through guid_to_string, NOT by printing the 16 bytes in
+            // memory order. guid_parse stores the first three textual fields
+            // little-endian into lo, so a raw byte dump reverses each of them:
+            // aabbccdd-eeff-... comes back as ddccbbaa-ffee-... . The value
+            // still looks like a GUID, so it fails only later and elsewhere --
+            // Osiris rejects it, and a mod doing Osi.IsPlayer(entity.Uuid.
+            // EntityUuid) silently gets nothing. guid_to_string is the exact
+            // inverse of guid_parse and is what the GUID->handle map already
+            // matches on, so this makes the two agree on the same bytes.
+            Guid guid = {0};
+            if (safe_memory_read((mach_vm_address_t)addr, &guid, sizeof(guid))) {
+                char buf[37];
+                guid_to_string(&guid, buf);
                 lua_pushstring(L, buf);
             } else {
                 lua_pushnil(L);
