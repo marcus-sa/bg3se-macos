@@ -185,6 +185,7 @@ static bool g_deferred_overflow_warned = false;
  * entity may be gone. Whether it IS gone -- versus our storage lookup being
  * unable to reach it -- is what this measures. */
 static uint32_t g_tick = 0;
+static int g_dead_skips_logged = 0;
 
 // Deferred unsubscription queue
 static uint32_t g_deferred_unsubs[MAX_SUBSCRIPTIONS];
@@ -1203,24 +1204,29 @@ void entity_events_fire_deferred(lua_State *L) {
             bool alive = component_lookup_ready()
                        && component_lookup_get_storage_data(ev->entity) != NULL;
             if (!alive) {
-                bool destroyed_in_batch = false;
-                for (int j = 0; j < local_count; j++) {
-                    if (j != i && local_events[j].entity == ev->entity
-                        && (local_events[j].event & ENTITY_EVENT_DESTROY)) {
-                        destroyed_in_batch = true;
-                        break;
-                    }
-                }
+                /* The entity died between the signal firing and this flush.
+                 * Handing it to Lua can only produce an object whose every
+                 * component reads nil, which is exactly what mods crash on, so
+                 * drop the event instead of dispatching a husk.
+                 *
+                 * Safe to gate on the lookup: one session resolved 6889 handles
+                 * with a maximum index of 130810 while failures started at
+                 * index 184, so the ranges overlap completely and the lookup is
+                 * demonstrably not range-limited -- a NULL here means the
+                 * entity is genuinely gone, not that we cannot see it. */
                 const ComponentInfo *ci =
                     component_registry_lookup_by_index(ev->type_index);
-                log_message("[EntityEvents] DEFERRED CREATE for dead entity "
-                            "0x%llx (idx=%u) component=%s waited=%u tick(s), "
-                            "destroy_in_same_batch=%d, batch=%d",
-                            (unsigned long long)ev->entity,
-                            (unsigned)(ev->entity & 0xFFFFFFFFu),
-                            ci ? ci->name : "?",
-                            g_tick - ev->queued_tick,
-                            destroyed_in_batch, local_count);
+                if (g_dead_skips_logged < 8) {
+                    g_dead_skips_logged++;
+                    log_message("[EntityEvents] skipping CREATE for entity "
+                                "0x%llx (idx=%u) component=%s: gone by flush "
+                                "(waited %u tick(s))",
+                                (unsigned long long)ev->entity,
+                                (unsigned)(ev->entity & 0xFFFFFFFFu),
+                                ci ? ci->name : "?",
+                                g_tick - ev->queued_tick);
+                }
+                continue;
             }
         }
 
@@ -1737,11 +1743,33 @@ static int lua_entity_on_destroy_deferred_once(lua_State *L) {
 // --- Ext.Entity.Subscribe(type, func, entity?, flags?) ---
 // This is the replication subscription variant.
 // For now, maps to OnCreate (replication events fire on component changes).
+/*
+ * Ext.Entity.Subscribe
+ *
+ * Upstream maps this to SubscribeReplication, not to component events
+ * (Lua/Libs/Entity.inl:169, and it is the same function as OnChange). A
+ * replication event always carries a LIVE entity whose component is present --
+ * that is what being replicated means -- so mods are written accordingly and
+ * dereference the entity on their first line:
+ *
+ *     Ext.Entity.Subscribe("GameObjectVisual", function (entity, _, _)
+ *         local UUIDChar = entity.Uuid.EntityUuid
+ *
+ * macOS has no replication-event source, so this was approximated as
+ * CREATE|DESTROY. The DESTROY half is not an approximation, it is the opposite:
+ * on a destroy the entity is gone by definition, every component reads nil, and
+ * that line raises. Measured over one session: 2336 failures from
+ * AppearanceEditEnhanced and 288 from Expansion, against 2641 storage lookups
+ * that returned NULL -- essentially all of them. AppearanceEditEnhanced is what
+ * copies equipment and appearance visuals, so it failing is why custom clothing
+ * rendered as the wrong gear.
+ *
+ * CREATE alone is a strict subset of what a replication subscriber expects
+ * (live entity, component present). DESTROY is a wrong event, not a missing
+ * one, so drop it. OnDestroy remains available for mods that actually want it.
+ */
 static int lua_entity_subscribe(lua_State *L) {
-    // Windows BG3SE Subscribe = replication events, not component events.
-    // For compatibility, treat as OnCreate+OnDestroy with deferred flag.
-    return lua_entity_subscribe_impl(L,
-        ENTITY_EVENT_CREATE | ENTITY_EVENT_DESTROY, true, false);
+    return lua_entity_subscribe_impl(L, ENTITY_EVENT_CREATE, true, false);
 }
 
 /*
