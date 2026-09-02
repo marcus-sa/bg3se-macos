@@ -7,8 +7,9 @@
  * cache entry unconditionally (see pipeline_wait_guard.c). Consumers then read
  * it back and walk into it.
  *
- * There is more than one such consumer. Two are confirmed by crash reports
- * taken 14 minutes apart, on different threads, faulting at different offsets:
+ * There is more than one such consumer. Three crashed in sequence -- fixing
+ * each one only moved the crash to the next -- so the whole family is patched
+ * here rather than one report at a time:
  *
  *   ls::DecalObject::Render        105dce840  ldrb w9, [x8, #0x30]   -> 0x30
  *     x8 = entry->pipeline, loaded at 105dce83c from [entry + 0x8].
@@ -67,6 +68,18 @@ typedef struct {
     uint64_t stub;         /* 4 words of brk padding to build the stub */
 } GuardSite;
 
+/* Every renderable that unpacks pipeline fields into PrepareDrawData before
+ * calling rf::metal::MetalRenderer::PreDraw. Found by scanning for the idiom
+ * (ldrb w<n>, [x<m>, #0x30] followed by reads at +0x8/+0x20 of the same
+ * register) and keeping the *::Render(RenderObjectData const&, ...) family --
+ * fixing them as they crash is whack-a-mole, and three of these had already
+ * bitten in sequence: decal, then PreDraw, then particle.
+ *
+ * Every skip target is that function's own epilogue, and each is the identical
+ * canonical shape -- `ldur x8, [x29, #-N]` loading the stack canary, then the
+ * __stack_chk_guard compare, register restore, ret. Verified to contain no
+ * `bl` between the skip target and the ret, so no destructor or cleanup call
+ * is bypassed; the draw submission is all that gets skipped. */
 static const GuardSite kSites[] = {
     { "DecalObject::Render",
       0x105dce840ULL, 0x3940C109u /* ldrb w9, [x8, #0x30]  */, 8,
@@ -74,6 +87,21 @@ static const GuardSite kSites[] = {
     { "MetalRenderer::PreDraw",
       0x10645f734ULL, 0xF94012A8u /* ldr  x8, [x21, #0x20] */, 21,
       0x10645f738ULL, 0x10645f778ULL, 0x10623b5dcULL },
+    { "FxParticleRenderBatch::Render",
+      0x105e44884ULL, 0x3940C008u /* ldrb w8, [x0, #0x30]  */, 0,
+      0x105e44888ULL, 0x105e44cd8ULL, 0x106148688ULL },
+    { "FxBillboard::BillboardObject::Render",
+      0x105e24e6cULL, 0x3940C109u /* ldrb w9, [x8, #0x30]  */, 8,
+      0x105e24e70ULL, 0x105e25350ULL, 0x105a025c8ULL },
+    { "FxMeshRenderList::Render",
+      0x105e37ab0ULL, 0x3940C008u /* ldrb w8, [x0, #0x30]  */, 0,
+      0x105e37ab4ULL, 0x105e37ea0ULL, 0x107742a7cULL },
+    { "TerrainRO::Render",
+      0x1061f4b64ULL, 0x3940C008u /* ldrb w8, [x0, #0x30]  */, 0,
+      0x1061f4b68ULL, 0x1061f4ed0ULL, 0x1077464a0ULL },
+    { "VelocityObjectData render fn",
+      0x106254ec8ULL, 0x3940C008u /* ldrb w8, [x0, #0x30]  */, 0,
+      0x106254eccULL, 0x1062562b0ULL, 0x107748a20ULL },
 };
 
 static uint32_t enc_b(uint64_t from, uint64_t to) {
