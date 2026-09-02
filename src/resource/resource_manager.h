@@ -187,6 +187,13 @@ int resource_iterate_all(ResourceBankType type, ResourceIteratorCallback callbac
 /**
  * Dump resource manager status to log.
  */
+/* Diagnostic: with BG3SE_RESOURCE_PROBE set to a comma-separated list of
+ * resource GUIDs, report once whether each is present in the Visual and
+ * Material banks, plus each bank's total. Answers "did this mod's visual
+ * resources actually load?" without guessing. Call once per tick; it retries
+ * until the banks are populated, then reports and stops. */
+void resource_probe_tick(void);
+
 void resource_dump_status(void);
 
 /**

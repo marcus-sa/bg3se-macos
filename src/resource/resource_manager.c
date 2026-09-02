@@ -528,3 +528,52 @@ void resource_dump_type(ResourceBankType type, int max_count) {
     int counts[2] = {0, max_count};
     resource_iterate_all(type, dump_resource_callback, counts);
 }
+
+
+// ============================================================================
+// Resource presence probe (diagnostic)
+// ============================================================================
+//
+// Mod-supplied visuals live in Public/<mod>/Content/[PAK]_<name>/<guid>.lsf and
+// must reach the Visual/Material banks for an item to render its own mesh. When
+// they do not, the item falls back to the vanilla template it declares with
+// `using`, which is why a modded outfit renders as an entirely different,
+// vanilla one. Whether they loaded is a fact we can read rather than infer.
+
+#include <stdlib.h>
+
+void resource_probe_tick(void) {
+    static int s_state = 0;        /* 0 = unstarted, 1 = probing, 2 = done */
+    static int s_attempts = 0;
+    static const char *s_list = NULL;
+
+    if (s_state == 2) return;
+    if (s_state == 0) {
+        s_list = getenv("BG3SE_RESOURCE_PROBE");
+        if (!s_list || !*s_list) { s_state = 2; return; }
+        s_state = 1;
+    }
+    if (!resource_manager_ready()) return;
+
+    /* Banks fill as the session loads; retry for a while before reporting. */
+    int visual = resource_get_count(RESOURCE_VISUAL);
+    int material = resource_get_count(RESOURCE_MATERIAL);
+    if (visual <= 0 && ++s_attempts < 600) return;
+
+    log_message("[Resource] probe: Visual bank=%d, Material bank=%d "
+                "(after %d tick(s))", visual, material, s_attempts);
+
+    char buf[1024];
+    size_t n = strlen(s_list);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, s_list, n);
+    buf[n] = '\0';
+
+    for (char *tok = strtok(buf, ", "); tok; tok = strtok(NULL, ", ")) {
+        void *v = resource_get_by_name(RESOURCE_VISUAL, tok);
+        void *m = resource_get_by_name(RESOURCE_MATERIAL, tok);
+        log_message("[Resource] probe %s: Visual=%s Material=%s", tok,
+                    v ? "FOUND" : "missing", m ? "FOUND" : "missing");
+    }
+    s_state = 2;
+}
