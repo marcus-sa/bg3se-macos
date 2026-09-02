@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+static void resolve_get_template_raw(void *binary_base);
+
 // ============================================================================
 // Constants and Offsets
 // ============================================================================
@@ -260,6 +262,7 @@ bool template_install_hooks(void* main_binary_base) {
     }
 
     g_template.main_binary_base = main_binary_base;
+    resolve_get_template_raw(main_binary_base);
 
     const VersionOffsets *off = offset_table_get();
     log_message("[Template] Using global pointer read approach (no hooks needed)");
@@ -548,16 +551,65 @@ static GameObjectTemplate* find_in_captured(const TemplateGuid* guid) {
  * Requires knowing the HashMap layout (buckets, keys, values).
  */
 static GameObjectTemplate* find_in_manager(void* manager, const TemplateGuid* guid) {
-    if (!manager || !guid) return NULL;
-
-    // TODO: Implement HashMap traversal once we understand the structure
-    // For now, use captured templates only
-
-    log_message("[Template] Manager HashMap lookup not yet implemented");
+    /* The manager's HashMap layout was never reversed, so this always returned
+     * NULL and logged a TODO -- meaning template lookup by GUID silently found
+     * nothing, and any probe of it reported a false negative.
+     *
+     * Reversing the map is unnecessary: the game exposes
+     * ls::GlobalTemplateManager::GetTemplateRaw(ls::FixedString const&), which
+     * does exactly this. Calling the engine's own lookup is both correct by
+     * construction and the pattern already used for
+     * ls::EntityStorageContainer::TryGet. It is keyed on the GUID STRING, so
+     * the string-based entry point below is the one that can serve it; a caller
+     * holding only the parsed struct still falls through to captured
+     * templates. */
+    (void)manager;
+    (void)guid;
     return NULL;
 }
 
+// ls::GlobalTemplateManager::GetTemplateRaw(ls::FixedString const&) const
+#define ADDR_GET_TEMPLATE_RAW    0x105f9cda4ULL
+#define GET_TEMPLATE_RAW_PROLOGUE 0xA9BF7BFDu   /* stp x29, x30, [sp, #-0x10]! */
+
+typedef void* (*GetTemplateRawFn)(void *mgr, const uint32_t *name_fs);
+static GetTemplateRawFn s_get_template_raw = NULL;
+
+static void resolve_get_template_raw(void *binary_base) {
+    if (s_get_template_raw || !binary_base) return;
+    uintptr_t addr = (uintptr_t)binary_base + (ADDR_GET_TEMPLATE_RAW - 0x100000000ULL);
+    uint32_t first = *(const uint32_t *)addr;
+    if (first != GET_TEMPLATE_RAW_PROLOGUE) {
+        log_message("[Template] GetTemplateRaw NOT resolved - 0x%llx reads "
+                    "0x%08x, expected 0x%08x (different build?)",
+                    (unsigned long long)ADDR_GET_TEMPLATE_RAW, first,
+                    GET_TEMPLATE_RAW_PROLOGUE);
+        return;
+    }
+    s_get_template_raw = (GetTemplateRawFn)addr;
+    log_message("[Template] GetTemplateRaw resolved at %p", (void *)addr);
+}
+
+/* Ask the engine's own global-bank lookup for a template by GUID string. */
+static GameObjectTemplate* find_in_global_by_name(const char* guid_str) {
+    void *mgr = template_get_manager_ptr(TEMPLATE_MANAGER_GLOBAL_BANK);
+    if (!mgr || !guid_str || !s_get_template_raw) return NULL;
+    if (!fixed_string_intern_ready()) return NULL;
+
+    uint32_t fs = fixed_string_intern(guid_str, -1);
+    if (fs == FS_NULL_INDEX) return NULL;
+
+    return (GameObjectTemplate*)s_get_template_raw(mgr, &fs);
+}
+
 GameObjectTemplate* template_get_by_guid(TemplateManagerType mgr_type, const char* guid_str) {
+    /* GetTemplateRaw belongs to GlobalTemplateManager, so it is only valid for
+     * that bank; the cache managers have their own layout. */
+    if (mgr_type == TEMPLATE_MANAGER_GLOBAL_BANK) {
+        GameObjectTemplate* tmpl = find_in_global_by_name(guid_str);
+        if (tmpl) return tmpl;
+    }
+
     TemplateGuid guid;
     if (!parse_guid(guid_str, &guid)) {
         return NULL;
@@ -588,6 +640,9 @@ GameObjectTemplate* template_get_by_fixedstring(TemplateManagerType mgr_type, ui
 }
 
 GameObjectTemplate* template_get(const char* guid_str) {
+    GameObjectTemplate* global = find_in_global_by_name(guid_str);
+    if (global) return global;
+
     TemplateGuid guid;
     if (!parse_guid(guid_str, &guid)) {
         return NULL;
