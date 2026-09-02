@@ -62,19 +62,36 @@ static bool s_installed = false;
 typedef enum {
     ALIAS_OFF = 0,   /* never substitute; log the miss */
     ALIAS_UUID,      /* material-name clones only, same namespace */
-    ALIAS_FULL       /* + Public/<mod>/ -> Public/Shared/ rewriting */
+    ALIAS_DECAL,     /* + namespace rewriting, decals only (default) */
+    ALIAS_FULL       /* + namespace rewriting for every category */
 } AliasMode;
 
-static AliasMode s_mode = ALIAS_FULL;
+/* Default to decals. A miss is not uniformly fatal: the engine skips most
+ * draws whose shader is missing -- this mod's materials were ALL missing
+ * before namespace rewriting existed, and the game rendered -- but a decal
+ * miss faults, and we have the stack to prove it (ls::DecalObject::Render,
+ * KERN_INVALID_ADDRESS at 0x30, EmissiveRenderStage worker). Rewriting every
+ * category to fix the one that crashes turned 132 materials into substitutes
+ * and painted the screen with streaks; rewriting only decals keeps the
+ * Immolation Aura fix and drops ~98% of the substitutions (30 of 1362 in the
+ * session that regressed). */
+static AliasMode s_mode = ALIAS_DECAL;
+
+/* Larian keys material category off the containing folder, and the rewrite
+ * preserves it, so the source path tells us the category. */
+static bool is_decal_material(const char *name) {
+    return strstr(name, "/Decal/") != NULL;
+}
 
 static void alias_mode_init(void) {
     const char *e = getenv("BG3SE_SHADER_ALIAS");
     if (!e || !*e) return;
-    if (strcmp(e, "off") == 0)       s_mode = ALIAS_OFF;
-    else if (strcmp(e, "uuid") == 0) s_mode = ALIAS_UUID;
-    else if (strcmp(e, "full") == 0) s_mode = ALIAS_FULL;
+    if (strcmp(e, "off") == 0)        s_mode = ALIAS_OFF;
+    else if (strcmp(e, "uuid") == 0)  s_mode = ALIAS_UUID;
+    else if (strcmp(e, "decal") == 0) s_mode = ALIAS_DECAL;
+    else if (strcmp(e, "full") == 0)  s_mode = ALIAS_FULL;
     else LOG_CORE_INFO("ShaderCloneShim: unknown BG3SE_SHADER_ALIAS='%s' "
-                       "(want off|uuid|full); keeping full", e);
+                       "(want off|uuid|decal|full); keeping decal", e);
 }
 
 /* Cold path only. Kept out of fake_GetShader so the hot path -- every shader
@@ -89,9 +106,12 @@ static uint64_t resolve_alias(void *mgr, const char *name) {
     char cands[SHADER_ALIAS_MAX_CANDIDATES][PATH_MAX];
     int n = 0;
 
-    if (s_mode == ALIAS_FULL) {
+    bool rewrite = (s_mode == ALIAS_FULL)
+                || (s_mode == ALIAS_DECAL && is_decal_material(name));
+
+    if (rewrite) {
         n = shader_alias_candidates(name, cands);
-    } else if (s_mode == ALIAS_UUID) {
+    } else if (s_mode != ALIAS_OFF) {
         if (shader_alias_strip_uuid(name, cands[0], PATH_MAX)) n = 1;
     }
 
@@ -155,8 +175,9 @@ bool shader_clone_shim_init(void *binary_base) {
     alias_mode_init();
     s_installed = true;
     LOG_CORE_INFO("ShaderCloneShim: installed (mode=%s)",
-                  s_mode == ALIAS_OFF  ? "off"
-                : s_mode == ALIAS_UUID ? "uuid (material-name clones only)"
-                                       : "full (clones + mod-namespace rewrite)");
+                  s_mode == ALIAS_OFF   ? "off"
+                : s_mode == ALIAS_UUID  ? "uuid (material-name clones only)"
+                : s_mode == ALIAS_DECAL ? "decal (clones + namespace rewrite for decals)"
+                                        : "full (clones + namespace rewrite, all categories)");
     return true;
 }

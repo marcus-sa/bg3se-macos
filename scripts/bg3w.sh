@@ -46,14 +46,27 @@ fi
 
 echo "DYLIB: $DYLIB" >> /tmp/bg3w_debug.log
 
-# Pass through BG3SE environment variables (Issue #65 diagnostics)
+# Pass through BG3SE environment variables (Issue #65 diagnostics).
+#
+# Steam launches this wrapper, so the interactive shell's environment is NOT
+# inherited: exporting BG3SE_* in a terminal has no effect on a Steam launch.
+# Read them from a config file as well, which is the only way to set one when
+# the game is started from the Steam library.
+BG3SE_ENV_FILE="${HOME}/Library/Application Support/BG3SE/bg3se.env"
+if [[ -f "$BG3SE_ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "$BG3SE_ENV_FILE"; set +a
+    echo "Sourced env file: $BG3SE_ENV_FILE" >> /tmp/bg3w_debug.log
+fi
+
+# Forward every BG3SE_* variable that is set, not a hand-maintained subset —
+# the old list silently dropped new switches (BG3SE_SHADER_ALIAS among them).
 BG3SE_ENVS=""
-for var in BG3SE_NO_HOOKS BG3SE_NO_NET BG3SE_MINIMAL; do
-    if [[ -n "${!var}" ]]; then
-        BG3SE_ENVS="${BG3SE_ENVS} ${var}=${!var}"
-        echo "  ${var}=${!var}" >> /tmp/bg3w_debug.log
-    fi
-done
+while IFS='=' read -r var _; do
+    [[ -n "${!var}" ]] || continue
+    BG3SE_ENVS="${BG3SE_ENVS} ${var}=${!var}"
+    echo "  ${var}=${!var}" >> /tmp/bg3w_debug.log
+done < <(env | grep -E '^BG3SE_[A-Z0-9_]+=' | sort)
 
 echo "Forcing ARM64 architecture with inline DYLD_INSERT_LIBRARIES" >> /tmp/bg3w_debug.log
 echo "===========================" >> /tmp/bg3w_debug.log
