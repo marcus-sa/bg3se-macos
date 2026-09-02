@@ -20,6 +20,7 @@ void register_staticdata_registry_tests(void);
 void register_lua_runtime_tests(void);
 void register_guid_lookup_tests(void);
 void register_user_variables_tests(void);
+void register_lifetime_scope_tests(void);
 void register_vars_persist_tests(void);
 void register_deal_damage_abi_tests(void);
 void register_deal_damage_payload_tests(void);
@@ -42,6 +43,7 @@ int main(void) {
     register_lua_runtime_tests();
     register_guid_lookup_tests();
     register_user_variables_tests();
+    register_lifetime_scope_tests();
     register_vars_persist_tests();
     register_deal_damage_abi_tests();
     register_deal_damage_payload_tests();

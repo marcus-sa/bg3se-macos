@@ -394,6 +394,7 @@ if(BUILD_TESTS)
         tests/tier0/test_lua_runtime.c
         tests/tier0/test_guid_lookup.c
         tests/tier0/test_user_variables.c
+        tests/tier0/test_lifetime_scope.c
         tests/tier0/test_vars_persist.c
         tests/tier0/test_deal_damage_abi.c
         tests/tier0/test_deal_damage_payload.c
@@ -409,6 +410,7 @@ if(BUILD_TESTS)
         src/mod/mod_paths.c
         src/lua/lua_runtime.c
         src/lua/lua_context.c
+        src/lifetime/lifetime.c
         src/lua/lua_modenv.c
         src/staticdata/generated_staticdata_registry.c
         src/staticdata/generated_staticdata_vtables.c
@@ -426,6 +428,7 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/mod
         ${CMAKE_SOURCE_DIR}/src/lua
         ${CMAKE_SOURCE_DIR}/src/vars
+        ${CMAKE_SOURCE_DIR}/src/lifetime
         ${CMAKE_SOURCE_DIR}/src/stats
         ${CMAKE_SOURCE_DIR}/src/enum
         ${CMAKE_SOURCE_DIR}/src/staticdata

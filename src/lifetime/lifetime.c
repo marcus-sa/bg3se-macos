@@ -238,7 +238,29 @@ LifetimeHandle lifetime_lua_get_current(lua_State *L) {
         return LIFETIME_NULL_HANDLE;
     }
 
-    return lifetime_get_current(state);
+    /* No current scope means we are OUTSIDE any event dispatch -- module
+     * bootstrap, a console command, the global chunk -- not that a scope has
+     * ended. Returning the null handle there stamped every object born at
+     * bootstrap as already expired, so the very next line failed:
+     *
+     *     for _, name in pairs(Ext.Stats.GetStats("PassiveData")) do
+     *         local passive = Ext.Stats.Get(name)
+     *         if string.find(passive.BoostConditions, ...)   -- "Lifetime of
+     *                                                        --  StatsObject
+     *                                                        --  has expired"
+     *
+     * which aborted Expansion's 193KB shared bootstrap. It only surfaced once
+     * GetStats started returning entries; while the list was empty the loop
+     * body never ran and the bug stayed hidden.
+     *
+     * A caller outside every scope outlives all of them, so the honest handle
+     * is the infinite one. This cannot regress anything that works today:
+     * an object stamped with the null handle is unusable by construction, so
+     * the only reachable change is a guaranteed error becoming a live object.
+     * Upstream agrees for this case -- Ext.Stats.Get returns a bare Object*
+     * from StatFindObject with no lifetime at all (Lua/Libs/Stats.inl:394). */
+    LifetimeHandle current = lifetime_get_current(state);
+    return LIFETIME_IS_NULL(current) ? LIFETIME_INFINITE_HANDLE : current;
 }
 
 bool lifetime_lua_is_valid(lua_State *L, LifetimeHandle handle) {
