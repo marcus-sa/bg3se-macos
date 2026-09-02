@@ -562,11 +562,24 @@ void resource_probe_tick(void) {
     if (!resource_manager_ready()) return;
 
     /* Banks fill as the session loads; retry for a while before reporting. */
+    /* Wait for BOTH systems, not just the resource banks. The banks populate
+     * far earlier than the template managers, so gating on them alone fired
+     * the probe before GlobalTemplateManager was captured -- every template
+     * lookup then bailed on a null manager and reported a false NOT FOUND,
+     * twice. template_manager_ready() also triggers the lazy capture, so call
+     * it first and then check the bank actually landed. */
     int any = 0;
     for (int t = 0; t < RESOURCE_TYPE_COUNT; t++) {
         if (resource_get_count((ResourceBankType)t) > 0) { any = 1; break; }
     }
-    if (!any && ++s_attempts < 600) return;
+    (void)template_manager_ready();
+    int tmpl_ready = template_has_manager(TEMPLATE_MANAGER_GLOBAL_BANK);
+    if ((!any || !tmpl_ready) && ++s_attempts < 3000) return;
+    if (!tmpl_ready) {
+        log_message("[Resource] probe: GlobalTemplateManager still unavailable "
+                    "after %d tick(s); template results below are unreliable",
+                    s_attempts);
+    }
 
     log_message("[Resource] probe: scanning all %d bank indices "
                 "(after %d tick(s))", RESOURCE_TYPE_COUNT, s_attempts);
