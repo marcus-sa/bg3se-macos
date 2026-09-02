@@ -18,6 +18,20 @@
 
 static void *g_EntityWorld = NULL;
 static void *g_StorageContainer = NULL;  // EntityWorld + 0x2d0
+
+/* Second world's storage. entity_system binds component events to the server
+ * AND the client EntityWorld (entity_events_bind(..., false)), but only ever
+ * called component_lookup_init() with the server one -- so every event that
+ * originated in the client world handed Lua an entity whose components all
+ * resolved to nil. That is the "attempt to index a nil value (field 'Uuid')"
+ * both AppearanceEditEnhanced and Expansion die on at SavegameLoaded.
+ *
+ * Measured rather than guessed: the failing handles decode to idx 101648+,
+ * every successful lookup in the same millisecond sits at idx <= 24825, and
+ * the deferred-dispatch instrumentation ruled out the entity simply being
+ * dead (waited=0 ticks, destroy_in_same_batch=0). Different index space =
+ * different world. */
+static void *g_StorageContainer2 = NULL;
 static void *g_TryGetFnAddr = NULL;      // Runtime address of TryGet
 static void *g_BinaryBase = NULL;
 static bool g_Initialized = false;
@@ -66,6 +80,28 @@ bool component_lookup_init(void *entityWorld, void *binaryBase) {
     return true;
 }
 
+bool component_lookup_add_world(void *entityWorld) {
+    if (!entityWorld) {
+        g_StorageContainer2 = NULL;
+        return true;
+    }
+
+    void *storage = *(void **)((char *)entityWorld + ENTITYWORLD_STORAGE_OFFSET);
+    if (!storage) {
+        LOG_ENTITY_DEBUG("Secondary world %p has NULL StorageContainer at +0x%x",
+                         entityWorld, ENTITYWORLD_STORAGE_OFFSET);
+        return false;
+    }
+    if (storage == g_StorageContainer) {
+        return true;                     /* same world; nothing to add */
+    }
+
+    g_StorageContainer2 = storage;
+    LOG_ENTITY_DEBUG("Secondary StorageContainer registered: %p (world %p)",
+                     storage, entityWorld);
+    return true;
+}
+
 bool component_lookup_ready(void) {
     return g_Initialized && g_StorageContainer && g_TryGetFnAddr;
 }
@@ -82,6 +118,15 @@ void *component_lookup_get_storage_data(uint64_t entityHandle) {
 
     // Call EntityStorageContainer::TryGet(EntityHandle) -> EntityStorageData*
     void *result = call_try_get(g_TryGetFnAddr, g_StorageContainer, entityHandle);
+
+    /* Fall back to the other world's storage. Purely additive: this path only
+     * runs where the lookup already returned NULL, so it can turn a nil into a
+     * live component but can never change one that already resolved. */
+    bool from_secondary = false;
+    if (!result && g_StorageContainer2) {
+        result = call_try_get(g_TryGetFnAddr, g_StorageContainer2, entityHandle);
+        from_secondary = (result != NULL);
+    }
 
     /* Instrumentation for the "entity.Uuid is nil in a component callback"
      * bug. The failing handles all decode to fresh, high indices
@@ -111,7 +156,7 @@ void *component_lookup_get_storage_data(uint64_t entityHandle) {
     LOG_ENTITY_DEBUG("TryGet(0x%llx) [thread=%u salt=0x%x idx=%u] -> %s "
                      "(session ok=%u maxOkIdx=%u / fail=%u minFailIdx=%u)",
                      (unsigned long long)entityHandle, thread, salt, index,
-                     result ? "hit" : "NULL",
+                     result ? (from_secondary ? "hit(world2)" : "hit") : "NULL",
                      s_ok, s_max_ok_idx, s_fail,
                      s_min_fail_idx == 0xFFFFFFFFu ? 0 : s_min_fail_idx);
 

@@ -727,6 +727,10 @@ bool entity_discover_client_world(void) {
         LOG_ENTITY_DEBUG("SUCCESS: Discovered EoCClient=%p, ClientEntityWorld=%p",
                    g_EoCClient, g_ClientEntityWorld);
 
+        // Component events are bound to this world too (just below), so its
+        // handles reach Lua — make them resolvable instead of nil.
+        component_lookup_add_world(g_ClientEntityWorld);
+
         // Bind entity events to client world
         entity_events_bind(g_ClientEntityWorld, false);
 

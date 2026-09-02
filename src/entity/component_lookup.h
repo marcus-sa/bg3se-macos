@@ -71,6 +71,12 @@ void *component_lookup_by_index(uint64_t entityHandle, uint16_t typeIndex,
  */
 void *component_lookup_get_storage_data(uint64_t entityHandle);
 
+/* Register a second EntityWorld (the client one) whose storage is consulted
+ * when a handle does not resolve in the primary/server storage. Entity events
+ * are bound to BOTH worlds, so client-world handles reach Lua and must be
+ * resolvable too. Safe to call more than once; a NULL world clears it. */
+bool component_lookup_add_world(void *entityWorld);
+
 // ============================================================================
 // Low-Level HashMap Traversal (for debugging/testing)
 // ============================================================================
