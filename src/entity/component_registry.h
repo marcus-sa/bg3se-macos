@@ -117,6 +117,20 @@ bool component_registry_register(const char *name, ComponentTypeIndex index,
                                   uint16_t size, bool is_proxy);
 
 /**
+ * Callback fired when a component that was registered with
+ * COMPONENT_INDEX_UNDEFINED finally learns its runtime index.
+ *
+ * This is the only moment at which a component name becomes subscribable, and
+ * it can happen seconds after mod bootstrap ran — see pending_subscriptions.h.
+ * Registered as a callback rather than a direct call so the registry keeps no
+ * dependency on the event system.
+ *
+ * Fires on the registry's own thread; the callee must be safe to run there.
+ */
+typedef void (*ComponentRegistryResolvedFn)(const char *name, ComponentTypeIndex index);
+void component_registry_set_resolved_callback(ComponentRegistryResolvedFn fn);
+
+/**
  * Get the number of discovered components.
  */
 int component_registry_count(void);

@@ -14,8 +14,10 @@
  */
 
 #include "entity_events.h"
-#include "component_aliases.h"
+#include "component_name_resolve.h"
 #include "component_registry.h"
+#include "component_typeid.h"
+#include "pending_subscriptions.h"
 #include "entity_system.h"
 #include "component_lookup.h"
 #include "../lifetime/lifetime.h"
@@ -811,6 +813,13 @@ static void unsubscribe_by_packed(uint32_t packed, lua_State *L) {
 // Public API Implementation
 // ============================================================================
 
+// Defined with the rest of the deferred-subscription machinery below.
+static uint64_t pending_bind(uint16_t type_index, uint64_t entity,
+                             uint32_t events, uint32_t flags,
+                             int lua_ref, void *lua_state);
+static void pending_release_ref(int lua_ref, void *lua_state);
+static void on_component_index_resolved(const char *name, ComponentTypeIndex index);
+
 void entity_events_init(void) {
     if (g_initialized) return;
 
@@ -822,6 +831,10 @@ void entity_events_init(void) {
     g_deferred_unsub_count = 0;
     g_bound_world = NULL;
     g_is_server = false;
+
+    pending_subscriptions_reset(NULL);
+    pending_subscriptions_set_binder(pending_bind);
+    component_registry_set_resolved_callback(on_component_index_resolved);
 
     // Start with capacity for 256 component types
     g_hooked_capacity = 0;
@@ -909,6 +922,11 @@ EntitySubscriptionId entity_events_subscribe(
         return ENTITY_SUB_INVALID;
     }
 
+    /* The callback ref stays the caller's on every failure path below, so the
+     * Lua state is not needed here; it is kept in the signature because the
+     * ref is meaningless without knowing which state it belongs to. */
+    (void)L;
+
     // Allocate pool slot
     int slot = pool_alloc();
     if (slot < 0) {
@@ -931,7 +949,6 @@ EntitySubscriptionId entity_events_subscribe(
     ComponentHooks *chooks = get_or_create_component_hooks(component_type_index);
     if (!chooks) {
         pool_free(slot);
-        if (L) luaL_unref(L, LUA_REGISTRYINDEX, lua_callback_ref);
         return ENTITY_SUB_INVALID;
     }
 
@@ -945,7 +962,6 @@ EntitySubscriptionId entity_events_subscribe(
             log_message("[WARN] [EntityEvents] Too many global hooks for type %u",
                         component_type_index);
             pool_free(slot);
-            if (L) luaL_unref(L, LUA_REGISTRYINDEX, lua_callback_ref);
             return ENTITY_SUB_INVALID;
         }
     } else {
@@ -966,7 +982,6 @@ EntitySubscriptionId entity_events_subscribe(
                 log_message("[WARN] [EntityEvents] Too many entity hooks for type %u",
                             component_type_index);
                 pool_free(slot);
-                if (L) luaL_unref(L, LUA_REGISTRYINDEX, lua_callback_ref);
                 return ENTITY_SUB_INVALID;
             }
         }
@@ -974,7 +989,6 @@ EntitySubscriptionId entity_events_subscribe(
             entry->indices[entry->count++] = packed;
         } else {
             pool_free(slot);
-            if (L) luaL_unref(L, LUA_REGISTRYINDEX, lua_callback_ref);
             return ENTITY_SUB_INVALID;
         }
     }
@@ -1006,11 +1020,102 @@ EntitySubscriptionId entity_events_subscribe(
     return MAKE_SUB_ID(SUB_TYPE_COMPONENT, packed);
 }
 
+// ============================================================================
+// Deferred (pending) subscriptions
+// ============================================================================
+//
+// A component name can be perfectly valid and still have no ComponentTypeIndex
+// at the moment a mod subscribes: mods call Ext.Entity.OnCreate at file scope
+// during PAK load, and the ECS assigns indices later (measured: 4.2s later for
+// esv::combat::JoinEventOneFrameComponent). Raising there aborted the whole
+// bootstrap chunk, so every registration below the offending line silently
+// never ran. Such subscriptions are parked and bound from the registry's
+// UNDEFINED -> real index transition instead.
+
+/* Bridge from the Lua-free pending table back into the real hook pool. */
+static uint64_t pending_bind(uint16_t type_index, uint64_t entity,
+                             uint32_t events, uint32_t flags,
+                             int lua_ref, void *lua_state) {
+    lua_State *L = (lua_State *)lua_state;
+    EntitySubscriptionId id = entity_events_subscribe(type_index, entity, events,
+                                                      flags, lua_ref, L);
+    if (id == ENTITY_SUB_INVALID) {
+        /* entity_events_subscribe leaves the ref to its caller, and there is no
+         * caller left to hand it back to at this point. */
+        if (L && lua_ref != LUA_NOREF && lua_ref != LUA_REFNIL) {
+            luaL_unref(L, LUA_REGISTRYINDEX, lua_ref);
+        }
+    }
+    return (uint64_t)id;
+}
+
+static void pending_release_ref(int lua_ref, void *lua_state) {
+    lua_State *L = (lua_State *)lua_state;
+    if (L && lua_ref != LUA_NOREF && lua_ref != LUA_REFNIL) {
+        luaL_unref(L, LUA_REGISTRYINDEX, lua_ref);
+    }
+}
+
+/* Registered with the component registry; see component_registry.c. */
+static void on_component_index_resolved(const char *name, ComponentTypeIndex index) {
+    if (pending_subscriptions_pending_count() == 0) return;
+    pending_subscriptions_flush(name, (uint16_t)index);
+}
+
+EntitySubscriptionId entity_events_subscribe_pending(
+    const char *engine_name,
+    uint64_t entity_handle,
+    uint32_t events,
+    uint32_t flags,
+    int lua_callback_ref,
+    lua_State *L
+) {
+    if (!g_initialized) {
+        log_message("[WARN] [EntityEvents] Subscribe(pending) called before init");
+        return ENTITY_SUB_INVALID;
+    }
+    if (!engine_name || !*engine_name || events == 0) {
+        return ENTITY_SUB_INVALID;
+    }
+
+    uint32_t handle = pending_subscriptions_add(engine_name, entity_handle,
+                                                events, flags, lua_callback_ref, L);
+    if (handle == PENDING_SUB_INVALID) {
+        return ENTITY_SUB_INVALID;
+    }
+
+    /* DEBUG, not INFO: the component registry is empty until an EntityWorld is
+     * captured, so at bootstrap every subscription takes this path. The useful
+     * signal is the per-component bind summary the flush logs. */
+    log_message("[DEBUG] [EntityEvents] Deferred subscription to %s — component has "
+                "no type index yet; will bind when the ECS registers it",
+                engine_name);
+    return MAKE_SUB_ID(SUB_TYPE_PENDING, handle);
+}
+
 bool entity_events_unsubscribe(EntitySubscriptionId id, lua_State *L) {
     if (id == ENTITY_SUB_INVALID) return false;
 
     uint32_t type_tag = SUB_ID_TYPE(id);
     uint32_t packed = SUB_ID_INDEX(id);
+
+    if (type_tag == SUB_TYPE_PENDING) {
+        int lua_ref = LUA_NOREF;
+        uint64_t real_id = ENTITY_SUB_INVALID;
+        switch (pending_subscriptions_remove(packed, &lua_ref, &real_id)) {
+            case PENDING_UNSUB_UNPARKED:
+                /* Still parked: nothing else holds this ref, so dropping it here
+                 * is what stops a later bind from firing a callback the mod has
+                 * already disowned — and stops the ref leaking outright. */
+                pending_release_ref(lua_ref, L);
+                return true;
+            case PENDING_UNSUB_FORWARD:
+                return entity_events_unsubscribe((EntitySubscriptionId)real_id, L);
+            case PENDING_UNSUB_NOT_FOUND:
+            default:
+                return false;
+        }
+    }
 
     if (type_tag != SUB_TYPE_COMPONENT) {
         // Replication and System subscriptions not yet implemented
@@ -1228,6 +1333,10 @@ void entity_events_cleanup(lua_State *L) {
         }
     }
 
+    /* Parked subscriptions hold a registry ref that no ComponentHook owns yet,
+     * so the loop above cannot see them. */
+    pending_subscriptions_reset(L ? pending_release_ref : NULL);
+
     g_hook_count = 0;
     g_deferred_count = 0;
     g_deferred_unsub_count = 0;
@@ -1280,102 +1389,84 @@ void entity_events_set_observer(EntityEventsObserver observer) {
 // Lua Bindings
 // ============================================================================
 
+// The name half of resolution lives in component_name_resolve.c so it can run
+// without a discovered index — and be tested against a registry state (name
+// known, index not yet assigned) that cannot be staged against the live game.
+
+static bool registry_view_has_index(const char *engine_name, uint16_t *out_index,
+                                    void *userdata) {
+    (void)userdata;
+    const ComponentInfo *info = component_registry_lookup(engine_name);
+    /* index != COMPONENT_INDEX_UNDEFINED is the guard from 18bde1a: an
+     * unresolved ls::TypeId<T>::m_TypeIndex reads 0, and index 0 belongs to a
+     * real component, so accepting it binds the subscription to a foreign
+     * component's slot. */
+    if (!info || info->index == COMPONENT_INDEX_UNDEFINED) return false;
+    *out_index = info->index;
+    return true;
+}
+
+static bool registry_view_is_registered(const char *engine_name, void *userdata) {
+    (void)userdata;
+    /*
+     * The generated TypeId authority, not the runtime registry, is what answers
+     * "is this a real component on this build". component_registry_init()
+     * requires a captured EntityWorld, so the runtime registry is still
+     * completely empty while mods bootstrap — the live trace has the whole
+     * registry populating at 14:15:18, four seconds after the PAK-load
+     * subscription at 14:15:14. Asking the runtime registry here would call
+     * every name at bootstrap unknown and reinstate the raise this change
+     * exists to remove.
+     *
+     * The generated tables are compile-time and build-stamped, so a name they
+     * do not carry really is a typo or a component this build lacks.
+     */
+    uint64_t va = 0;
+    if (component_typeid_generated_lookup(engine_name, "ecs::ComponentTypeIdContext",
+                                          &va)) {
+        return true;
+    }
+    /* Runtime-only registrations (Ext.Entity.RegisterComponent) have no
+     * generated row. */
+    return component_registry_lookup(engine_name) != NULL;
+}
+
+static const ComponentNameRegistryView g_registry_view = {
+    registry_view_has_index,
+    registry_view_is_registered,
+    NULL
+};
+
+typedef struct {
+    ComponentNameResolution state;
+    uint16_t index;                          /* valid only when RESOLVED */
+    char engine_name[COMPONENT_MAX_NAME_LEN];/* valid on RESOLVED and PENDING */
+} ResolvedComponent;
+
+/**
+ * Resolve the component name at `arg_index`.
+ * A PENDING result is a success: the name is real, only its index is missing.
+ */
+static void resolve_component(lua_State *L, int arg_index, ResolvedComponent *out) {
+    const char *name = luaL_checkstring(L, arg_index);
+    out->index = COMPONENT_INDEX_UNDEFINED;
+    out->engine_name[0] = '\0';
+    out->state = component_name_resolve(name, &g_registry_view,
+                                        out->engine_name, sizeof(out->engine_name),
+                                        &out->index);
+}
+
 /**
  * Resolve a component type name to a ComponentTypeIndex.
  * Supports both full names ("eoc::HealthComponent") and short names ("Health").
+ * Returns COMPONENT_INDEX_UNDEFINED for names that are unknown *and* for names
+ * whose component has not been assigned an index yet — callers that need to
+ * tell those two apart must use resolve_component().
  */
 static uint16_t resolve_component_type(lua_State *L, int arg_index) {
-    const char *name = luaL_checkstring(L, arg_index);
-
-    // Try exact match first
-    const ComponentInfo *info = component_registry_lookup(name);
-    if (info && info->index != COMPONENT_INDEX_UNDEFINED) {
-        return info->index;
-    }
-
-    // Explicit short-name table before any probing. The probe below can only
-    // reach components whose engine name is <outer namespace> + <short name>,
-    // so it can never reach esv::combat::JoinEventOneFrameComponent from
-    // "CombatantJoinEvent": neither the inner namespace nor the OneFrame infix
-    // is recoverable from the short name. Expansion subscribes to that
-    // component at file scope in BootstrapServer.lua, so the raised "Unknown
-    // component type" aborted the whole chunk and every registration after that
-    // line silently never ran.
-    // The table is also the authority where the probe would answer but answer
-    // wrongly: Windows binds "Level" to ls::LevelComponent (eoc::LevelComponent
-    // is "EocLevel") while the probe reaches eoc:: first.
-    const char *aliased = component_alias_lookup(name);
-    if (aliased) {
-        info = component_registry_lookup(aliased);
-        if (info && info->index != COMPONENT_INDEX_UNDEFINED) {
-            return info->index;
-        }
-        // Fall through rather than fail: an alias whose target this build does
-        // not register must not be worse than having no alias at all.
-    }
-
-    // Guard against names too long for probing. Longest expansion is
-    // "eoc::" (5) + "character_creation::definition::" (32) + "Component" (9)
-    // = 46.
-    // snprintf would truncate rather than overflow, and a truncated name simply
-    // fails to match, but keep the guard honest about the real bound.
-    if (strlen(name) > COMPONENT_MAX_NAME_LEN - 47) {
-        return COMPONENT_INDEX_UNDEFINED;
-    }
-
-    // Try common prefixed variants
-    char prefixed[COMPONENT_MAX_NAME_LEN];
-    const char *prefixes[] = {
-        "eoc::", "esv::", "ecl::", "ls::", NULL
-    };
-    const char *suffixes[] = {
-        "Component", "", NULL
-    };
-
-    for (int p = 0; prefixes[p]; p++) {
-        for (int s = 0; suffixes[s]; s++) {
-            snprintf(prefixed, sizeof(prefixed), "%s%s%s", prefixes[p], name, suffixes[s]);
-            info = component_registry_lookup(prefixed);
-            if (info && info->index != COMPONENT_INDEX_UNDEFINED) {
-                return info->index;
-            }
-        }
-    }
-
-    // Nested-namespace abbreviations. BG3SE contracts a component's inner
-    // namespace into an initialism, so eoc::character_creation::StateComponent
-    // is written "CCState" by mods. Probing only the outer prefixes above can
-    // never reach those, which is why AppearanceEditEnhanced ("CCState") and
-    // CustomCompanions ("CCLevelUpDefinition") both failed to load with
-    // "Unknown component type" while the components were registered all along.
-    // Several rows may share an abbreviation: BG3SE collapses deeper nesting
-    // into the same initialism, so CCRespec is
-    // eoc::character_creation::definition::RespecComponent while CCState is
-    // eoc::character_creation::StateComponent. Rows are tried in order.
-    static const struct { const char *abbrev; const char *ns; } nested[] = {
-        { "CC",     "character_creation::" },
-        { "CC",     "character_creation::definition::" },
-        { "Hotbar", "hotbar::" },
-        { NULL, NULL }
-    };
-
-    for (int n = 0; nested[n].abbrev; n++) {
-        size_t alen = strlen(nested[n].abbrev);
-        if (strncmp(name, nested[n].abbrev, alen) != 0 || !name[alen]) continue;
-
-        for (int p = 0; prefixes[p]; p++) {
-            for (int s = 0; suffixes[s]; s++) {
-                snprintf(prefixed, sizeof(prefixed), "%s%s%s%s",
-                         prefixes[p], nested[n].ns, name + alen, suffixes[s]);
-                info = component_registry_lookup(prefixed);
-                if (info && info->index != COMPONENT_INDEX_UNDEFINED) {
-                    return info->index;
-                }
-            }
-        }
-    }
-
-    return COMPONENT_INDEX_UNDEFINED;
+    ResolvedComponent rc;
+    resolve_component(L, arg_index, &rc);
+    return rc.state == COMPONENT_NAME_RESOLVED ? rc.index : COMPONENT_INDEX_UNDEFINED;
 }
 
 /**
@@ -1384,8 +1475,12 @@ static uint16_t resolve_component_type(lua_State *L, int arg_index) {
  */
 static int lua_entity_subscribe_impl(lua_State *L, uint32_t events,
                                       bool force_deferred, bool force_once) {
-    uint16_t type_index = resolve_component_type(L, 1);
-    if (type_index == COMPONENT_INDEX_UNDEFINED) {
+    /* Only a name that resolves to nothing at all is an error. A name whose
+     * component simply has no index yet is parked below — raising on it aborted
+     * the caller's whole bootstrap chunk. */
+    ResolvedComponent rc;
+    resolve_component(L, 1, &rc);
+    if (rc.state == COMPONENT_NAME_UNRESOLVED) {
         return luaL_error(L, "Unknown component type: %s", lua_tostring(L, 1));
     }
 
@@ -1416,8 +1511,11 @@ static int lua_entity_subscribe_impl(lua_State *L, uint32_t events,
     lua_pushvalue(L, 2);
     int ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-    EntitySubscriptionId id = entity_events_subscribe(
-        type_index, entity, events, flags, ref, L);
+    EntitySubscriptionId id =
+        (rc.state == COMPONENT_NAME_RESOLVED)
+            ? entity_events_subscribe(rc.index, entity, events, flags, ref, L)
+            : entity_events_subscribe_pending(rc.engine_name, entity, events,
+                                              flags, ref, L);
 
     if (id == ENTITY_SUB_INVALID) {
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
@@ -1446,8 +1544,10 @@ static int lua_entity_proxy_subscribe_impl(lua_State *L, uint32_t events,
         return lifetime_lua_expired_error(L, "Entity");
     }
 
-    uint16_t type_index = resolve_component_type(L, 2);
-    if (type_index == COMPONENT_INDEX_UNDEFINED) {
+    /* Same deferral as the Ext.Entity.On* family — see there. */
+    ResolvedComponent rc;
+    resolve_component(L, 2, &rc);
+    if (rc.state == COMPONENT_NAME_UNRESOLVED) {
         return luaL_error(L, "Unknown component type: %s", lua_tostring(L, 2));
     }
 
@@ -1468,8 +1568,12 @@ static int lua_entity_proxy_subscribe_impl(lua_State *L, uint32_t events,
     lua_pushvalue(L, 3);
     int ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-    EntitySubscriptionId id = entity_events_subscribe(
-        type_index, (uint64_t)ud->handle, events, flags, ref, L);
+    EntitySubscriptionId id =
+        (rc.state == COMPONENT_NAME_RESOLVED)
+            ? entity_events_subscribe(rc.index, (uint64_t)ud->handle, events,
+                                      flags, ref, L)
+            : entity_events_subscribe_pending(rc.engine_name, (uint64_t)ud->handle,
+                                              events, flags, ref, L);
 
     if (id == ENTITY_SUB_INVALID) {
         luaL_unref(L, LUA_REGISTRYINDEX, ref);

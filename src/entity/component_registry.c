@@ -36,6 +36,9 @@ static void *g_GetRawComponentAddr = NULL;
 static bool g_Initialized = false;
 static void *g_EntityWorld = NULL;
 
+// Fired when an entry transitions from COMPONENT_INDEX_UNDEFINED to a real index
+static ComponentRegistryResolvedFn g_ResolvedCallback = NULL;
+
 // ============================================================================
 // Hash Functions
 // ============================================================================
@@ -121,6 +124,7 @@ bool component_registry_register(const char *name, ComponentTypeIndex index,
     if (existing) {
         // Update existing entry
         int idx = (int)(existing - g_Components);
+        ComponentTypeIndex prev_index = g_Components[idx].index;
         g_Components[idx].index = index;
         g_Components[idx].size = size;
         g_Components[idx].is_proxy = is_proxy;
@@ -134,6 +138,24 @@ bool component_registry_register(const char *name, ComponentTypeIndex index,
 
         LOG_ENTITY_DEBUG("Updated component: %s -> index=%u, size=%u",
                      name, (unsigned)index, (unsigned)size);
+
+        /*
+         * The single point at which a known component name becomes usable.
+         * Every generated component is pre-registered with
+         * COMPONENT_INDEX_UNDEFINED long before the ECS assigns its index, and
+         * the assignment can land seconds after mod bootstrap has already
+         * asked to subscribe to it (measured: 4.2s for
+         * esv::combat::JoinEventOneFrameComponent). Notifying here is what lets
+         * those parked subscriptions bind instead of having been refused.
+         *
+         * Only the UNDEFINED -> real transition notifies: a re-register with
+         * the same index is a discovery pass re-running, not new information.
+         */
+        if (g_ResolvedCallback &&
+            prev_index == COMPONENT_INDEX_UNDEFINED &&
+            index != COMPONENT_INDEX_UNDEFINED) {
+            g_ResolvedCallback(g_Components[idx].name, index);
+        }
         return true;
     }
 
@@ -179,7 +201,23 @@ bool component_registry_register(const char *name, ComponentTypeIndex index,
 
     LOG_ENTITY_DEBUG("Registered component: %s -> index=%u, size=%u, proxy=%d",
                  name, (unsigned)index, (unsigned)size, is_proxy);
+
+    /*
+     * Most components are pre-registered with COMPONENT_INDEX_UNDEFINED and
+     * become usable via the update branch above, but not all: a curated entry
+     * that register_known_components() does not list, and anything from the
+     * curated-only or one-frame authority tables, is first seen here with its
+     * index already in hand. Skipping this case would leave subscriptions to
+     * those components parked forever.
+     */
+    if (g_ResolvedCallback && index != COMPONENT_INDEX_UNDEFINED) {
+        g_ResolvedCallback(info->name, index);
+    }
     return true;
+}
+
+void component_registry_set_resolved_callback(ComponentRegistryResolvedFn fn) {
+    g_ResolvedCallback = fn;
 }
 
 // ============================================================================

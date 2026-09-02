@@ -58,6 +58,10 @@ typedef void (*EntityEventsObserver)(uint64_t entity_handle, uint32_t event,
 #define SUB_TYPE_REPLICATION  1
 #define SUB_TYPE_COMPONENT    2
 #define SUB_TYPE_SYSTEM       3
+/* A subscription accepted before its component had a ComponentTypeIndex. The
+ * id stays valid and stable across the later bind, so a mod can unsubscribe
+ * with the same handle whether or not the component has resolved yet. */
+#define SUB_TYPE_PENDING      4
 
 // Build subscription ID from type tag and pool index
 #define MAKE_SUB_ID(type_tag, index) \
@@ -103,9 +107,38 @@ void entity_events_bind(void *entity_world, bool is_server);
  * @param lua_callback_ref luaL_ref reference to the Lua callback function
  * @param L Lua state that owns the callback
  * @return Subscription ID, or ENTITY_SUB_INVALID on failure
+ *
+ * On failure the callback reference is NOT released — the caller keeps
+ * ownership and must unref it. Releasing here as well used to double-unref the
+ * same registry slot on the hook-list-full paths, which corrupts the Lua
+ * registry free list.
  */
 EntitySubscriptionId entity_events_subscribe(
     uint16_t component_type_index,
+    uint64_t entity_handle,
+    uint32_t events,
+    uint32_t flags,
+    int lua_callback_ref,
+    struct lua_State *L
+);
+
+/**
+ * Subscribe to a component that this build knows about but whose
+ * ComponentTypeIndex the ECS has not assigned yet.
+ *
+ * Mods call Ext.Entity.OnCreate at file scope during PAK load, which runs
+ * before the ECS registers most component types. Refusing those was what made
+ * a single valid-but-early name abort the rest of the mod's bootstrap chunk.
+ * The subscription binds for real once component_registry learns the index.
+ *
+ * @param engine_name Canonical engine class name (e.g.
+ *                    "esv::combat::JoinEventOneFrameComponent")
+ * @return Subscription ID, or ENTITY_SUB_INVALID if the pending table is full.
+ *         As with entity_events_subscribe, the caller keeps ownership of the
+ *         callback reference on failure.
+ */
+EntitySubscriptionId entity_events_subscribe_pending(
+    const char *engine_name,
     uint64_t entity_handle,
     uint32_t events,
     uint32_t flags,

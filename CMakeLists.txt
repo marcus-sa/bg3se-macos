@@ -180,6 +180,8 @@ add_library(bg3se SHARED
     src/entity/component_registry.c
     src/entity/generated_component_registry.c
     src/entity/component_aliases.c
+    src/entity/component_name_resolve.c
+    src/entity/pending_subscriptions.c
     src/entity/component_lookup.c
     src/entity/component_typeid.c
     src/entity/component_property.c
@@ -400,12 +402,16 @@ if(BUILD_TESTS)
         tests/tier0/test_deal_damage_payload.c
         tests/tier0/test_spell_meta_layout.c
         tests/tier0/test_component_aliases.c
+        tests/tier0/test_component_name_resolve.c
+        tests/tier0/test_pending_subscriptions.c
         tests/tier0/test_component_offsets_spells.c
         tests/tier0/test_server_object_layout.c
         tests/tier0/stub_logging.c
         src/core/safe_memory.c
         src/entity/guid_lookup.c
         src/entity/component_aliases.c
+        src/entity/component_name_resolve.c
+        src/entity/pending_subscriptions.c
         src/osiris/pattern_scan.c
         src/mod/mod_paths.c
         src/lua/lua_runtime.c

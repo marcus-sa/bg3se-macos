@@ -26,6 +26,8 @@ void register_deal_damage_abi_tests(void);
 void register_deal_damage_payload_tests(void);
 void register_spell_meta_layout_tests(void);
 void register_component_alias_tests(void);
+void register_component_name_resolve_tests(void);
+void register_pending_subscriptions_tests(void);
 void register_component_offsets_spell_tests(void);
 void register_server_object_layout_tests(void);
 
@@ -49,6 +51,8 @@ int main(void) {
     register_deal_damage_payload_tests();
     register_spell_meta_layout_tests();
     register_component_alias_tests();
+    register_component_name_resolve_tests();
+    register_pending_subscriptions_tests();
     register_component_offsets_spell_tests();
     register_server_object_layout_tests();
 
