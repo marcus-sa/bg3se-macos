@@ -217,6 +217,7 @@ add_library(bg3se SHARED
     src/game/vt_unload_guard.c
     src/render/shader_clone_shim.c
     src/render/shader_alias.c
+    src/render/decal_null_guard.c
     src/render/pipeline_probe.c
     src/render/pipeline_wait_guard.c
     src/game/focus_hack.c

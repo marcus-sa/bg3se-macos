@@ -114,6 +114,7 @@ extern "C" {
 #include "video_skip.h"
 #include "vt_unload_guard.h"
 #include "../render/shader_clone_shim.h"
+#include "../render/decal_null_guard.h"
 #include "../render/pipeline_probe.h"
 #include "../render/pipeline_wait_guard.h"
 #include "focus_hack.h"
@@ -5502,6 +5503,14 @@ init_subsystems:
                             pipeline_wait_guard_init(binary_base);
                         }
                     }
+                    // Decals whose pipeline failed to compile fault on a
+                    // null deref in ls::DecalObject::Render. Independent of
+                    // the shader shim: it fires for any missing shader, and
+                    // is what kills the game on Immolation Aura.
+                    if (!no_hooks && !hook_group_disabled("BG3SE_NO_DECAL_GUARD")) {
+                        decal_null_guard_init(binary_base);
+                    }
+
                     if (!no_hooks && !hook_group_disabled("BG3SE_NO_SHADER_SHIM")) {
                         shader_clone_shim_init(binary_base);
                     } else {
