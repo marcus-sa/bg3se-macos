@@ -25,42 +25,59 @@
 // ResourceBankType Enumeration (34 types)
 // ============================================================================
 
+/* Bank indices are MEASURED against this build, not inherited from Windows.
+ *
+ * Every type is one higher than the Windows ls::EResourceType ordering. Four
+ * independent measurements agree, taken by looking known resources up by UUID
+ * across all 34 indices and seeing which bank answers:
+ *
+ *   AnimationSet  3 -> 4   (two vanilla UUIDs; the original lone correction)
+ *   Visual        0 -> 1   (VisualBank .lsf from a mod's Content/[PAK]_* dir)
+ *   Texture       4 -> 5   (TextureBank .lsf, same source)
+ *   Material      5 -> 6   (MaterialBank .lsf, 8 of 8 landed here)
+ *
+ * The AnimationSet override was never a special case — it was one symptom of a
+ * table-wide off-by-one, which is why every other type read the neighbouring
+ * bank and Ext.Resource.Get returned nil (or the wrong kind) for real UUIDs.
+ * Index 0 is whatever this build places ahead of Visual; it is populated, so it
+ * gets a name rather than being folded away. */
 typedef enum {
-    RESOURCE_VISUAL = 0,
-    RESOURCE_VISUAL_SET = 1,
-    RESOURCE_ANIMATION = 2,
-    RESOURCE_ANIMATION_SET = 3,
-    RESOURCE_TEXTURE = 4,
-    RESOURCE_MATERIAL = 5,
-    RESOURCE_PHYSICS = 6,
-    RESOURCE_EFFECT = 7,
-    RESOURCE_SCRIPT = 8,
-    RESOURCE_SOUND = 9,
-    RESOURCE_LIGHTING = 10,
-    RESOURCE_ATMOSPHERE = 11,
-    RESOURCE_ANIMATION_BLUEPRINT = 12,
-    RESOURCE_MESH_PROXY = 13,
-    RESOURCE_MATERIAL_SET = 14,
-    RESOURCE_BLEND_SPACE = 15,
-    RESOURCE_FCURVE = 16,
-    RESOURCE_TIMELINE = 17,
-    RESOURCE_DIALOG = 18,
-    RESOURCE_VOICE_BARK = 19,
-    RESOURCE_TILE_SET = 20,
-    RESOURCE_IK_RIG = 21,
-    RESOURCE_SKELETON = 22,
-    RESOURCE_VIRTUAL_TEXTURE = 23,
-    RESOURCE_TERRAIN_BRUSH = 24,
-    RESOURCE_COLOR_LIST = 25,
-    RESOURCE_CHARACTER_VISUAL = 26,
-    RESOURCE_MATERIAL_PRESET = 27,
-    RESOURCE_SKIN_PRESET = 28,
-    RESOURCE_CLOTH_COLLIDER = 29,
-    RESOURCE_DIFFUSION_PROFILE = 30,
-    RESOURCE_LIGHT_COOKIE = 31,
-    RESOURCE_TIMELINE_SCENE = 32,
-    RESOURCE_SKELETON_MIRROR_TABLE = 33,
-    RESOURCE_TYPE_COUNT = 34
+    RESOURCE_UNKNOWN_0 = 0,
+    RESOURCE_VISUAL = 1,
+    RESOURCE_VISUAL_SET = 2,
+    RESOURCE_ANIMATION = 3,
+    RESOURCE_ANIMATION_SET = 4,
+    RESOURCE_TEXTURE = 5,
+    RESOURCE_MATERIAL = 6,
+    RESOURCE_PHYSICS = 7,
+    RESOURCE_EFFECT = 8,
+    RESOURCE_SCRIPT = 9,
+    RESOURCE_SOUND = 10,
+    RESOURCE_LIGHTING = 11,
+    RESOURCE_ATMOSPHERE = 12,
+    RESOURCE_ANIMATION_BLUEPRINT = 13,
+    RESOURCE_MESH_PROXY = 14,
+    RESOURCE_MATERIAL_SET = 15,
+    RESOURCE_BLEND_SPACE = 16,
+    RESOURCE_FCURVE = 17,
+    RESOURCE_TIMELINE = 18,
+    RESOURCE_DIALOG = 19,
+    RESOURCE_VOICE_BARK = 20,
+    RESOURCE_TILE_SET = 21,
+    RESOURCE_IK_RIG = 22,
+    RESOURCE_SKELETON = 23,
+    RESOURCE_VIRTUAL_TEXTURE = 24,
+    RESOURCE_TERRAIN_BRUSH = 25,
+    RESOURCE_COLOR_LIST = 26,
+    RESOURCE_CHARACTER_VISUAL = 27,
+    RESOURCE_MATERIAL_PRESET = 28,
+    RESOURCE_SKIN_PRESET = 29,
+    RESOURCE_CLOTH_COLLIDER = 30,
+    RESOURCE_DIFFUSION_PROFILE = 31,
+    RESOURCE_LIGHT_COOKIE = 32,
+    RESOURCE_TIMELINE_SCENE = 33,
+    RESOURCE_SKELETON_MIRROR_TABLE = 34,
+    RESOURCE_TYPE_COUNT = 35
 } ResourceBankType;
 
 // ============================================================================

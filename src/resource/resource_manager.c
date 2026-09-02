@@ -41,6 +41,7 @@
 // ============================================================================
 
 static const char* s_resource_type_names[RESOURCE_TYPE_COUNT] = {
+    "Unknown0",
     "Visual",
     "VisualSet",
     "Animation",
@@ -163,11 +164,14 @@ const char* resource_type_name(ResourceBankType type) {
 // The remaining names keep their positional index because nothing has been
 // measured about them either way. Add entries here as they are proven, and
 // only then.
+/* Empty now: the AnimationSet correction turned out to be one instance of a
+ * table-wide off-by-one, which the enum itself now encodes (see the header).
+ * Kept as a hook for any type that is genuinely out of sequence rather than
+ * merely shifted — add an entry only once it has been measured. */
 static const struct {
     const char *name;
     int index;
 } s_resource_type_overrides[] = {
-    { "AnimationSet", 4 },
     { NULL, 0 }
 };
 
