@@ -492,6 +492,35 @@ static void register_damage_flags(void) {
 // ============================================================================
 static void register_spell_flags(void) {
     int idx = enum_registry_add_type("SpellFlags", true);
+    // Windows BG3SE spellings FIRST, so enum_find_label returns them.
+    // These are what mods compare against as string literals -- Expansion does
+    //     if flag == "IsSpell"
+    // and this build calls that bit "Spell", so emitting the game name made the
+    // check silently false. For an enum whose purpose is mod comparison the
+    // Windows spelling is the API contract; the game names below stay
+    // registered as aliases, so Ext.Enums.SpellFlags resolves either dialect
+    // and a bit Windows does not name still emits the game name.
+    REG_VALUE(idx, "HasVerbalComponent", 0x1);
+    REG_VALUE(idx, "HasSomaticComponent", 0x2);
+    REG_VALUE(idx, "IsJump", 0x4);
+    REG_VALUE(idx, "IsAttack", 0x8);
+    REG_VALUE(idx, "IsMelee", 0x10);
+    REG_VALUE(idx, "HasHighGroundRangeExtension", 0x20);
+    REG_VALUE(idx, "IsConcentration", 0x40);
+    REG_VALUE(idx, "AddFallDamageOnLand", 0x80);
+    REG_VALUE(idx, "IsSpell", 0x400);
+    REG_VALUE(idx, "CombatLogSetSingleLineRoll", 0x800);
+    REG_VALUE(idx, "IsEnemySpell", 0x1000);
+    REG_VALUE(idx, "CannotTargetItems", 0x4000);
+    REG_VALUE(idx, "IsHarmful", 0x2000000);
+    REG_VALUE(idx, "IsTrap", 0x4000000);
+    REG_VALUE(idx, "IsDefaultWeaponAction", 0x8000000);
+    REG_VALUE(idx, "CallAlliesSpell", 0x10000000);
+    REG_VALUE(idx, "Wildshape", 0x2000000000ULL);
+    REG_VALUE(idx, "TrajectoryRules", 0x10000000000ULL);
+
+    // This build's own names, from _Enum_SpellFlags::NAMES/VALUES. Aliases for
+    // any bit Windows also names; the sole label for any bit it does not.
     if (idx < 0) return;
 
     EnumTypeInfo *info = enum_registry_get(idx);
@@ -559,27 +588,6 @@ static void register_spell_flags(void) {
     REG_VALUE(idx, "DisplayDamageModifiers", 0x100000000000000ULL);
     REG_VALUE(idx, "ChasmRecovery", 0x200000000000000ULL);
 
-    // Windows BG3SE spellings for the same bits. Registered after the game's
-    // own names so enum_find_label keeps returning the game name, while
-    // Ext.Enums.SpellFlags.IsSpell and friends still resolve.
-    REG_VALUE(idx, "HasVerbalComponent", 0x1);
-    REG_VALUE(idx, "HasSomaticComponent", 0x2);
-    REG_VALUE(idx, "IsJump", 0x4);
-    REG_VALUE(idx, "IsAttack", 0x8);
-    REG_VALUE(idx, "IsMelee", 0x10);
-    REG_VALUE(idx, "HasHighGroundRangeExtension", 0x20);
-    REG_VALUE(idx, "IsConcentration", 0x40);
-    REG_VALUE(idx, "AddFallDamageOnLand", 0x80);
-    REG_VALUE(idx, "IsSpell", 0x400);
-    REG_VALUE(idx, "CombatLogSetSingleLineRoll", 0x800);
-    REG_VALUE(idx, "IsEnemySpell", 0x1000);
-    REG_VALUE(idx, "CannotTargetItems", 0x4000);
-    REG_VALUE(idx, "IsHarmful", 0x2000000);
-    REG_VALUE(idx, "IsTrap", 0x4000000);
-    REG_VALUE(idx, "IsDefaultWeaponAction", 0x8000000);
-    REG_VALUE(idx, "CallAlliesSpell", 0x10000000);
-    REG_VALUE(idx, "Wildshape", 0x2000000000ULL);
-    REG_VALUE(idx, "TrajectoryRules", 0x10000000000ULL);
 }
 
 // ============================================================================

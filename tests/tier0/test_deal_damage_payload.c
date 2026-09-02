@@ -242,21 +242,30 @@ TEST(damage_type_labels_match_game_tables) {
  * registered entry for a value, so the game's own spelling must stay ahead of
  * the Windows alias or the array silently changes dialect.
  */
-TEST(spell_flags_prefers_game_spelling_over_windows_alias) {
+TEST(spell_flags_prefers_windows_spelling_over_game_alias) {
     EnumTypeInfo *info = enum_registry_find_by_name("SpellFlags");
     ASSERT_NOT_NULL(info);
     ASSERT_TRUE(info->is_bitfield);
     int idx = info->registry_index;
 
-    ASSERT_STR_EQ(enum_find_label(idx, 0x400), "Spell");
-    ASSERT_STR_EQ(enum_find_label(idx, 0x1),   "Verbal");
-    ASSERT_STR_EQ(enum_find_label(idx, 0x40),  "Concentration");
-    ASSERT_STR_EQ(enum_find_label(idx, 0x2000000ULL), "Harmful");
+    /* Emitted labels are the Windows spellings: mods compare these as string
+     * literals, e.g. Expansion's EXP_IsSpell does `if flag == "IsSpell"`, and
+     * this build calls that bit "Spell". The Windows name is the API contract
+     * here, so it must win value -> label. */
+    ASSERT_STR_EQ(enum_find_label(idx, 0x400), "IsSpell");
+    ASSERT_STR_EQ(enum_find_label(idx, 0x1),   "HasVerbalComponent");
+    ASSERT_STR_EQ(enum_find_label(idx, 0x40),  "IsConcentration");
+    ASSERT_STR_EQ(enum_find_label(idx, 0x2000000ULL), "IsHarmful");
+
+    /* A bit Windows does not name still emits this build's own spelling. */
     ASSERT_STR_EQ(enum_find_label(idx, 0x200000000000000ULL), "ChasmRecovery");
 
-    /* The Windows spellings still resolve name -> value. */
+    /* Both dialects still resolve name -> value, so Ext.Enums.SpellFlags
+     * accepts either. */
     ASSERT_EQ(enum_find_value(idx, "IsSpell"), (int64_t)0x400);
+    ASSERT_EQ(enum_find_value(idx, "Spell"),   (int64_t)0x400);
     ASSERT_EQ(enum_find_value(idx, "HasVerbalComponent"), (int64_t)0x1);
+    ASSERT_EQ(enum_find_value(idx, "Verbal"),  (int64_t)0x1);
     ASSERT_EQ(enum_find_value(idx, "Wildshape"), (int64_t)0x2000000000ULL);
 
     /* Bit 43 has no entry in this build's table under either spelling. */
@@ -297,6 +306,6 @@ void register_deal_damage_payload_tests(void) {
     enum_registry_init();
     enum_register_definitions();
     RUN_TEST(damage_type_labels_match_game_tables);
-    RUN_TEST(spell_flags_prefers_game_spelling_over_windows_alias);
+    RUN_TEST(spell_flags_prefers_windows_spelling_over_game_alias);
     RUN_TEST(unverified_hit_enums_stay_unregistered);
 }
