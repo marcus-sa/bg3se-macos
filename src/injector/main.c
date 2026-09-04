@@ -115,6 +115,7 @@ extern "C" {
 #include "vt_unload_guard.h"
 #include "../render/shader_clone_shim.h"
 #include "../render/null_pipeline_guard.h"
+#include "../render/effect_list_guard.h"
 #include "../render/pipeline_probe.h"
 #include "../render/pipeline_wait_guard.h"
 #include "focus_hack.h"
@@ -5506,6 +5507,14 @@ init_subsystems:
                     // is what kills the game on Immolation Aura.
                     if (!no_hooks && !hook_group_disabled("BG3SE_NO_NULL_PIPELINE_GUARD")) {
                         null_pipeline_guard_init(binary_base);
+                    }
+                    // Those seven sites are all on the render path, so they
+                    // only ever suppressed the DRAW. A mod whose materials
+                    // have no Metal shaders still gets its effects built and
+                    // torn down, and the teardown walks a dangling sub-effect
+                    // pointer on the GameThread, where no render guard looks.
+                    if (!no_hooks && !hook_group_disabled("BG3SE_NO_EFFECT_LIST_GUARD")) {
+                        effect_list_guard_init(binary_base);
                     }
 
                     if (!no_hooks && !hook_group_disabled("BG3SE_NO_SHADER_SHIM")) {

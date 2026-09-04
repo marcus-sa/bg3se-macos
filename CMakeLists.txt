@@ -218,6 +218,7 @@ add_library(bg3se SHARED
     src/render/shader_clone_shim.c
     src/render/shader_alias.c
     src/render/null_pipeline_guard.c
+    src/render/effect_list_guard.c
     src/render/pipeline_probe.c
     src/render/pipeline_wait_guard.c
     src/game/focus_hack.c
