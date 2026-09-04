@@ -210,6 +210,16 @@ static void json_sb_value(lua_State *L, int index, JsonBuf *jb, int depth);
 static void json_sb_table(lua_State *L, int index, JsonBuf *jb, int depth) {
     if (depth > JSON_MAX_DEPTH) { jb_addstring(jb, "null"); return; }
 
+    // Every level holds a key and a value on the Lua stack while it recurses,
+    // and a C function is only guaranteed LUA_MINSTACK (20) slots. Nothing here
+    // pushes through a growing API, so without this a payload nested deeper
+    // than ~6 levels walks off the end of the stack allocation: api_check is
+    // compiled out in a release Lua build, so the overflow silently lands in
+    // whatever heap block follows instead of raising. The save-store payload
+    // (root -> mods -> uuid -> vars -> key -> table -> table) already reaches 7.
+    // Peak usage for one level is 3 - nil, key, value, plus a coerced key copy.
+    if (!lua_checkstack(L, 4)) { jb_addstring(jb, "null"); return; }
+
     // Check if it's an array (sequential integer keys starting from 1)
     int is_array = 1;
     int max_index = 0;
