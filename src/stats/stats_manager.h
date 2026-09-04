@@ -484,4 +484,14 @@ void stats_dump_modifierlist_attributes(int ml_index);
  */
 void stats_probe_fixedstrings_offset(void);
 
+/**
+ * Diagnostic: with BG3SE_STATS_PROBE set to a comma-separated list of stat
+ * entry names, report once what the parser actually produced for each --
+ * its type, its `using` parent, and a handful of commonly overridden
+ * properties. Answers "did this mod's override take effect?" without
+ * inferring it from in-game numbers. Call once per tick; it waits for the
+ * stats manager, then reports and stops. No-op unless the variable is set.
+ */
+void stats_probe_tick(void);
+
 #endif // STATS_MANAGER_H

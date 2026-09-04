@@ -4845,7 +4845,7 @@ static bool fake_Event(void *thisPtr, uint32_t funcId, OsiArgumentDesc *args) {
 
         // Fire deferred entity component events (Issue #69)
         entity_events_fire_deferred(L);
-        resource_probe_tick();  // no-op unless BG3SE_RESOURCE_PROBE is set
+        stats_probe_tick();  // no-op unless BG3SE_STATS_PROBE is set
 
         // Poll for one-frame event components (Issue #51)
         events_poll_oneframe_components(L);

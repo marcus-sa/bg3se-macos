@@ -2823,3 +2823,70 @@ void stats_probe_fixedstrings_offset(void) {
 
     LOG_STATS_DEBUG("=== End FixedStrings probe ===");
 }
+
+// ============================================================================
+// Stats parse probe (diagnostic)
+// ============================================================================
+//
+// A mod entry that declares `using "<parent>"` and then overrides a field
+// should report the override. If it reports the parent's value instead, the
+// child's line never took effect -- invisible in game except as wrong numbers.
+// What the parser produced is a fact we can read rather than infer.
+
+/* Report what the stats system actually parsed for each named entry. */
+static void stats_probe_once(const char *list) {
+    static const char *kProps[] = {
+        "Damage", "DefaultBoosts", "Boosts", "PassivesOnEquip", "Rarity"
+    };
+    char buf[1024];
+    size_t n = strlen(list);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, list, n);
+    buf[n] = '\0';
+
+    for (char *tok = strtok(buf, ", "); tok; tok = strtok(NULL, ", ")) {
+        StatsObjectPtr o = stats_get(tok);
+        if (!o) {
+            log_message("[Stats] probe %s -> NOT FOUND", tok);
+            continue;
+        }
+        const char *using_ = stats_get_using(o);
+        log_message("[Stats] probe %s (type=%s, using=%s)", tok,
+                    stats_get_type(o) ? stats_get_type(o) : "?",
+                    using_ ? using_ : "-");
+        for (size_t i = 0; i < sizeof(kProps)/sizeof(kProps[0]); i++) {
+            if (!stats_has_property(o, kProps[i])) continue;
+            const char *v = stats_get_string(o, kProps[i]);
+            log_message("[Stats]     %-16s = %s", kProps[i], v ? v : "(null)");
+        }
+    }
+}
+
+void stats_probe_tick(void) {
+    static int s_state = 0;        /* 0 = unstarted, 1 = probing, 2 = done */
+    static int s_attempts = 0;
+    static const char *s_list = NULL;
+
+    if (s_state == 2) return;
+    if (s_state == 0) {
+        s_list = getenv("BG3SE_STATS_PROBE");
+        if (!s_list || !*s_list) { s_state = 2; return; }
+        s_state = 1;
+    }
+
+    /* Gate on the subsystem this probe actually reads. The earlier version
+     * waited on the resource banks and template managers instead, and firing
+     * before those were ready reported a false NOT FOUND for everything --
+     * so wait for the entries to parse, not for an unrelated subsystem, and
+     * cap the wait so a genuinely absent entry still gets reported. */
+    if (!stats_manager_ready()) {
+        if (++s_attempts < 3000) return;
+        log_message("[Stats] probe: stats manager not ready after %d tick(s)",
+                    s_attempts);
+        s_state = 2;
+        return;
+    }
+
+    stats_probe_once(s_list);
+    s_state = 2;
+}

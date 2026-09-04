@@ -128,37 +128,13 @@ void *component_lookup_get_storage_data(uint64_t entityHandle) {
         from_secondary = (result != NULL);
     }
 
-    /* Instrumentation for the "entity.Uuid is nil in a component callback"
-     * bug. The failing handles all decode to fresh, high indices
-     * (thread=5 salt=1 idx=101695/101696) while the one that resolved was
-     * idx=257, and a session made only five lookups total -- far too few to
-     * tell "the entity is dead by flush time" from "our lookup cannot reach
-     * high indices". Decode every handle and carry running extremes, so a
-     * single successful high-index lookup settles it.
-     *
-     * Layout is upstream's (CoreLib/Base/BaseTypes.h): thread = h >> 54,
-     * salt = (h >> 32) & 0x3fffff, index = low 32 bits. */
-    static uint32_t s_ok = 0, s_fail = 0;
-    static uint32_t s_max_ok_idx = 0, s_min_fail_idx = 0xFFFFFFFFu;
-
-    unsigned thread = (unsigned)(entityHandle >> 54);
-    unsigned salt   = (unsigned)((entityHandle >> 32) & 0x3fffff);
-    uint32_t index  = (uint32_t)(entityHandle & 0xFFFFFFFFu);
-
-    if (result) {
-        s_ok++;
-        if (index > s_max_ok_idx) s_max_ok_idx = index;
-    } else {
-        s_fail++;
-        if (index < s_min_fail_idx) s_min_fail_idx = index;
-    }
-
-    LOG_ENTITY_DEBUG("TryGet(0x%llx) [thread=%u salt=0x%x idx=%u] -> %s "
-                     "(session ok=%u maxOkIdx=%u / fail=%u minFailIdx=%u)",
-                     (unsigned long long)entityHandle, thread, salt, index,
-                     result ? (from_secondary ? "hit(world2)" : "hit") : "NULL",
-                     s_ok, s_max_ok_idx, s_fail,
-                     s_min_fail_idx == 0xFFFFFFFFu ? 0 : s_min_fail_idx);
+    /* Handle layout is upstream's (CoreLib/Base/BaseTypes.h): index is the low
+     * 32 bits. Logged because a NULL here is what makes `entity.Uuid` nil in a
+     * component callback, and the index is what identifies which entity. */
+    LOG_ENTITY_DEBUG("TryGet(0x%llx) [idx=%u] -> %s",
+                     (unsigned long long)entityHandle,
+                     (uint32_t)(entityHandle & 0xFFFFFFFFu),
+                     result ? (from_secondary ? "hit(world2)" : "hit") : "NULL");
 
     return result;
 }
