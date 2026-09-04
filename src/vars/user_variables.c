@@ -220,7 +220,9 @@ void uvar_init(void) {
 void uvar_shutdown(void) {
     if (!g_Initialized) return;
 
-    // Free all entity variable storage
+    // Every count is reset alongside the pointer it describes. A count left
+    // standing over a freed array outlives this call in the static storage and
+    // reads as "that many live slots" to whoever allocates the array next.
     for (int i = 0; i < g_EntityCount; i++) {
         if (g_Entities[i].vars) {
             for (int j = 0; j < g_Entities[i].var_count; j++) {
@@ -229,6 +231,7 @@ void uvar_shutdown(void) {
             free(g_Entities[i].vars);
             g_Entities[i].vars = NULL;
         }
+        g_Entities[i].var_count = 0;
     }
 
     // Free all mod variable storage
@@ -240,10 +243,12 @@ void uvar_shutdown(void) {
             free(g_Mods[i].vars);
             g_Mods[i].vars = NULL;
         }
+        g_Mods[i].var_count = 0;
         if (g_Mods[i].prototypes) {
             free(g_Mods[i].prototypes);
             g_Mods[i].prototypes = NULL;
         }
+        g_Mods[i].prototype_count = 0;
     }
 
     g_PrototypeCount = 0;
@@ -367,16 +372,25 @@ void uvar_set(lua_State *L, const char *guid, uint64_t handle,
         return;
     }
 
-    // Ensure vars array is large enough
+    // Ensure vars array is large enough.
+    //
+    // `old_count` is what the buffer actually carries over, which is nothing at
+    // all when vars is NULL - realloc(NULL, n) returns UNINITIALISED memory. A
+    // stale var_count standing over a NULL vars would otherwise start the init
+    // loop past the end of the fresh buffer (initialising nothing) and shrink
+    // the count on the way out, leaving free_variable() below to free whatever
+    // garbage happened to sit in the slot. Growing only, and initialising every
+    // slot the old buffer did not carry, makes both halves safe independently.
     if (ent->vars == NULL || ent->var_count <= proto_idx) {
-        int new_count = proto_idx + 1;
-        UserVariable *new_vars = realloc(ent->vars, new_count * sizeof(UserVariable));
+        int old_count = ent->vars && ent->var_count > 0 ? ent->var_count : 0;
+        int new_count = proto_idx + 1 > old_count ? proto_idx + 1 : old_count;
+        UserVariable *new_vars = realloc(ent->vars, (size_t)new_count * sizeof(UserVariable));
         if (!new_vars) {
             luaL_error(L, "Out of memory");
             return;
         }
         // Initialize new slots
-        for (int i = ent->var_count; i < new_count; i++) {
+        for (int i = old_count; i < new_count; i++) {
             new_vars[i].type = UVAR_TYPE_NULL;
             new_vars[i].dirty = false;
             new_vars[i].value.string = NULL;
@@ -695,12 +709,16 @@ void uvar_store_clear(lua_State *L) {
     // mvar_set auto-registering with default flags instead.
     for (int i = 0; i < g_ModCount; i++) {
         ModVariables *mod = &g_Mods[i];
-        if (!mod->vars) continue;
-        for (int j = 0; j < mod->var_count; j++) {
-            free_variable(&mod->vars[j]);
+        // Reset the count even when there is no array to free. Skipping the
+        // whole body on a NULL vars is what preserves a stale var_count, and
+        // that is precisely the state mvar_set below cannot grow out of safely.
+        if (mod->vars) {
+            for (int j = 0; j < mod->var_count; j++) {
+                free_variable(&mod->vars[j]);
+            }
+            free(mod->vars);
+            mod->vars = NULL;
         }
-        free(mod->vars);
-        mod->vars = NULL;
         mod->var_count = 0;
         mod->dirty = false;
     }
@@ -1140,16 +1158,25 @@ void mvar_set(lua_State *L, const char *mod_uuid, const char *key, int value_ind
         }
     }
 
-    // Ensure vars array is large enough
+    // Ensure vars array is large enough.
+    //
+    // `old_count` is what the buffer actually carries over, which is nothing at
+    // all when vars is NULL - realloc(NULL, n) returns UNINITIALISED memory. A
+    // stale var_count standing over a NULL vars would otherwise start the init
+    // loop past the end of the fresh buffer (initialising nothing) and shrink
+    // the count on the way out, leaving free_variable() below to free whatever
+    // garbage happened to sit in the slot. Growing only, and initialising every
+    // slot the old buffer did not carry, makes both halves safe independently.
     if (mod->vars == NULL || mod->var_count <= proto_idx) {
-        int new_count = proto_idx + 1;
-        UserVariable *new_vars = realloc(mod->vars, new_count * sizeof(UserVariable));
+        int old_count = mod->vars && mod->var_count > 0 ? mod->var_count : 0;
+        int new_count = proto_idx + 1 > old_count ? proto_idx + 1 : old_count;
+        UserVariable *new_vars = realloc(mod->vars, (size_t)new_count * sizeof(UserVariable));
         if (!new_vars) {
             luaL_error(L, "Out of memory");
             return;
         }
         // Initialize new slots
-        for (int i = mod->var_count; i < new_count; i++) {
+        for (int i = old_count; i < new_count; i++) {
             new_vars[i].type = UVAR_TYPE_NULL;
             new_vars[i].dirty = false;
             new_vars[i].value.string = NULL;
